@@ -1,0 +1,51 @@
+worker_processes 1;
+pid /tmp/nginx.pid;
+error_log /dev/stderr info;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log /dev/stdout;
+    client_max_body_size 20m;
+    proxy_buffering off;
+    proxy_request_buffering off;
+
+    server {
+        listen ${PORT};
+
+        location = /health {
+            proxy_pass http://127.0.0.1:8000/health;
+            proxy_set_header Host $host;
+        }
+
+        location = /gateway-health {
+            proxy_pass http://127.0.0.1:8010/health;
+            proxy_set_header Host $host;
+        }
+
+        location /v1/ {
+            proxy_pass http://127.0.0.1:8010;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-API-Key $http_x_api_key;
+            proxy_set_header X-Ombre-Session-Id $http_x_ombre_session_id;
+            proxy_set_header Connection "";
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+        }
+
+        location / {
+            proxy_pass http://127.0.0.1:8000;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-API-Key $http_x_api_key;
+            proxy_set_header Connection "";
+            proxy_read_timeout 600s;
+            proxy_send_timeout 600s;
+        }
+    }
+}
