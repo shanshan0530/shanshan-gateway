@@ -1,0 +1,79 @@
+# yaml-language-server: $schema=https://schema.zeabur.app/template.json
+
+apiVersion: zeabur.com/v1
+kind: Template
+metadata:
+  name: Shanshan Gateway
+spec:
+  description: A lightweight OpenAI-compatible streaming proxy for a Claude relay.
+  tags:
+    - API
+    - Python
+    - Tool
+  variables:
+    - key: PUBLIC_DOMAIN
+      type: DOMAIN
+      name: 网关域名
+      description: 选择一个用于新前端连接的 .zeabur.app 域名。
+    - key: UPSTREAM_BASE_URL
+      type: STRING
+      name: 中转站 Base URL
+      description: OpenAI 兼容的中转站地址，可带或不带 /v1。
+    - key: UPSTREAM_API_KEY
+      type: STRING
+      name: 中转站 API Key
+      description: 只会作为服务环境变量保存，不会写进 GitHub。
+    - key: UPSTREAM_MODEL
+      type: STRING
+      name: 中转站模型名
+      description: 中转站实际支持的 Claude 模型名称。
+  readme: |-
+    # Shanshan Gateway
+
+    部署完成后，在服务说明中复制自动生成的网关 API Key。
+
+    新前端填写：
+
+    - Base URL: `https://你的域名/v1`
+    - API Key: 部署说明中的 Gateway API Key
+    - 模型名: `shanshan-claude`
+
+    健康检查地址：`https://你的域名/health`
+  services:
+    - name: shanshan-gateway
+      template: GIT
+      domainKey: PUBLIC_DOMAIN
+      spec:
+        source:
+          source: GITHUB
+          repo: 1301440311
+          branch: main
+          rootDirectory: /
+        ports:
+          - id: web
+            port: 8080
+            type: HTTP
+        env:
+          PORT:
+            default: "8080"
+          GATEWAY_API_KEY:
+            default: ${PASSWORD}
+            expose: true
+          PUBLIC_MODEL_NAME:
+            default: shanshan-claude
+        instructions:
+          - type: DOMAIN
+            title: 网关地址
+            content: https://${PUBLIC_DOMAIN}
+          - type: PASSWORD
+            title: Gateway API Key
+            content: ${GATEWAY_API_KEY}
+            category: Credentials
+          - type: TEXT
+            title: 新前端 Base URL
+            content: https://${PUBLIC_DOMAIN}/v1
+        healthCheck:
+          type: HTTP
+          port: web
+          http:
+            path: /health
