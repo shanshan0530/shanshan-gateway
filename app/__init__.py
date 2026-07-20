@@ -1,0 +1,1 @@
+"""Shanshan Gateway application package."""
