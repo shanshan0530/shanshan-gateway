@@ -12,6 +12,10 @@ RUN git clone https://github.com/Yinglianchun/Ombre-Brain.git /app/ombre \
     && git checkout "$OMBRE_COMMIT" \
     && pip install --no-cache-dir -r requirements.txt
 
+COPY ombre-zeabur/apply_pin_restore_patch.py /app/apply_pin_restore_patch.py
+RUN python /app/apply_pin_restore_patch.py \
+    && python -m py_compile /app/ombre/bucket_manager.py
+
 COPY ombre-zeabur/generate_config.py /app/generate_config.py
 COPY ombre-zeabur/nginx.conf.template /app/nginx.conf.template
 COPY ombre-zeabur/start.sh /app/start.sh
