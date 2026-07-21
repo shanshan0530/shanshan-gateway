@@ -25,6 +25,8 @@ class Settings:
     telegram_system_prompt: str = ""
     telegram_history_messages: int = 24
     telegram_poll_timeout_seconds: int = 30
+    telegram_db_path: str = "/app/data/telegram.sqlite3"
+    telegram_max_stored_messages: int = 500
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -42,6 +44,13 @@ class Settings:
             telegram_system_prompt=os.getenv("TELEGRAM_SYSTEM_PROMPT", "").strip(),
             telegram_history_messages=_positive_int("TELEGRAM_HISTORY_MESSAGES", 24),
             telegram_poll_timeout_seconds=_positive_int("TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
+            telegram_db_path=os.getenv(
+                "TELEGRAM_DB_PATH", "/app/data/telegram.sqlite3"
+            ).strip()
+            or "/app/data/telegram.sqlite3",
+            telegram_max_stored_messages=_positive_int(
+                "TELEGRAM_MAX_STORED_MESSAGES", 500
+            ),
         )
 
     @property

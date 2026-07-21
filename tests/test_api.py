@@ -25,7 +25,7 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",

@@ -42,7 +42,7 @@ async def lifespan(_: FastAPI):
             telegram_task = None
 
 
-app = FastAPI(title="Shanshan Gateway", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Shanshan Gateway", version="0.3.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -69,7 +69,7 @@ def require_auth(
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "shanshan-gateway", "version": "0.2.0", "status": "ok"}
+    return {"service": "shanshan-gateway", "version": "0.3.0", "status": "ok"}
 
 
 @app.get("/health")
@@ -87,7 +87,7 @@ async def health() -> JSONResponse:
         status_code=200 if ready else 503,
         content={
             "status": "ok" if ready else "needs_config",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "missing_env": missing,
             "upstream_url_valid": url_ok,
             "upstream_host": _safe_host(normalized_url),

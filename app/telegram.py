@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from collections import defaultdict
 from typing import Any
 
@@ -9,6 +10,7 @@ import httpx
 
 from .config import Settings
 from .proxy import chat_completions_url, public_error_message
+from .storage import ConversationStore
 
 
 logger = logging.getLogger("shanshan-gateway.telegram")
@@ -20,7 +22,9 @@ class TelegramBridge:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._offset = 0
-        self._histories: dict[str, list[dict[str, str]]] = defaultdict(list)
+        self._volatile_histories: dict[str, list[dict[str, str]]] = defaultdict(list)
+        self._store: ConversationStore | None = None
+        self._store_unavailable = False
         self._client: httpx.AsyncClient | None = None
 
     async def run(self) -> None:
@@ -149,7 +153,7 @@ class TelegramBridge:
             return
 
         if command == "/reset":
-            self._histories.pop(chat_id, None)
+            self._clear_history(chat_id)
             await self._send_text(chat_id, "当前 TG 短期对话已经清空。")
             return
 
@@ -169,7 +173,7 @@ class TelegramBridge:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
             messages.append({"role": "system", "content": self.settings.telegram_system_prompt})
-        messages.extend(self._histories.get(chat_id, []))
+        messages.extend(self._recent_history(chat_id))
         messages.append({"role": "user", "content": user_text})
 
         payload = {
@@ -204,11 +208,56 @@ class TelegramBridge:
         return answer
 
     def _remember(self, chat_id: str, role: str, content: str) -> None:
-        history = self._histories[chat_id]
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                store.append(chat_id, role, content)
+                return
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        history = self._volatile_histories[chat_id]
         history.append({"role": role, "content": content})
         limit = self.settings.telegram_history_messages
         if len(history) > limit:
             del history[:-limit]
+
+    def _recent_history(self, chat_id: str) -> list[dict[str, str]]:
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                return store.recent(chat_id, self.settings.telegram_history_messages)
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        return list(self._volatile_histories.get(chat_id, []))
+
+    def _clear_history(self, chat_id: str) -> None:
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                store.clear(chat_id)
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        self._volatile_histories.pop(chat_id, None)
+
+    def _conversation_store(self) -> ConversationStore | None:
+        if self._store_unavailable:
+            return None
+        if self._store is None:
+            try:
+                self._store = ConversationStore(
+                    self.settings.telegram_db_path,
+                    self.settings.telegram_max_stored_messages,
+                )
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+                return None
+        return self._store
+
+    def _mark_store_unavailable(self) -> None:
+        if not self._store_unavailable:
+            logger.warning("telegram persistence unavailable; using process memory")
+        self._store_unavailable = True
+        self._store = None
 
     def _is_allowed(self, user_id: str) -> bool:
         return user_id == self.settings.telegram_allowed_user_id
