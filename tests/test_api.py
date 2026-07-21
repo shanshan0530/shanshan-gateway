@@ -25,10 +25,11 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",
+        "telegram": {"enabled": False, "authorized": False},
     }
     assert "upstream-secret" not in response.text
 
@@ -79,3 +80,27 @@ def test_chat_rejects_missing_messages(monkeypatch):
         json={"model": "friendly-name"},
     )
     assert response.status_code == 400
+
+
+def test_telegram_push_requires_gateway_auth(monkeypatch):
+    monkeypatch.setattr(main, "settings", configured_settings())
+    client = TestClient(main.app)
+    assert client.post("/api/telegram/push", json={"text": "hello"}).status_code == 401
+
+
+def test_telegram_push_sends_to_private_user(monkeypatch):
+    monkeypatch.setattr(main, "settings", configured_settings())
+    sent = []
+
+    async def fake_push(text):
+        sent.append(text)
+
+    monkeypatch.setattr(main.telegram_bridge, "push", fake_push)
+    response = TestClient(main.app).post(
+        "/api/telegram/push",
+        headers={"Authorization": "Bearer gateway-secret"},
+        json={"text": "主动消息测试"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert sent == ["主动消息测试"]

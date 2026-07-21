@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 import httpx
@@ -12,13 +14,35 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import Settings
 from .proxy import chat_completions_url, prepare_payload, public_error_message
+from .telegram import TelegramBridge
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
 
 settings = Settings.from_env()
-app = FastAPI(title="Shanshan Gateway", version="0.1.0")
+telegram_bridge = TelegramBridge(settings)
+telegram_task: asyncio.Task[None] | None = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global telegram_task
+    if settings.telegram_enabled:
+        telegram_task = asyncio.create_task(telegram_bridge.run(), name="telegram-bridge")
+    try:
+        yield
+    finally:
+        if telegram_task is not None:
+            telegram_task.cancel()
+            try:
+                await telegram_task
+            except asyncio.CancelledError:
+                pass
+            telegram_task = None
+
+
+app = FastAPI(title="Shanshan Gateway", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -45,7 +69,7 @@ def require_auth(
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "shanshan-gateway", "version": "0.1.0", "status": "ok"}
+    return {"service": "shanshan-gateway", "version": "0.2.0", "status": "ok"}
 
 
 @app.get("/health")
@@ -63,10 +87,14 @@ async def health() -> JSONResponse:
         status_code=200 if ready else 503,
         content={
             "status": "ok" if ready else "needs_config",
-            "version": "0.1.0",
+            "version": "0.2.0",
             "missing_env": missing,
             "upstream_url_valid": url_ok,
             "upstream_host": _safe_host(normalized_url),
+            "telegram": {
+                "enabled": settings.telegram_enabled,
+                "authorized": settings.telegram_authorized,
+            },
         },
     )
 
@@ -114,6 +142,24 @@ async def chat_completions(request: Request) -> Response:
         len(prepared["messages"]),
     )
     return await forward_to_upstream(prepared)
+
+
+@app.post("/api/telegram/push", dependencies=[Depends(require_auth)])
+async def telegram_push(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="请求体不是有效 JSON") from exc
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="text 必须是非空字符串")
+    if len(text) > 20_000:
+        raise HTTPException(status_code=413, detail="Telegram 主动消息过长")
+    try:
+        await telegram_bridge.push(text)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return JSONResponse({"ok": True})
 
 
 async def forward_to_upstream(payload: dict[str, Any]) -> Response:

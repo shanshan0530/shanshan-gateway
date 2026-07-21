@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不保存聊天、不接数据库、不修改 Ombre Brain，也暂时不做世界书、心跳或欲望系统。
+第一版刻意保持简单：不保存聊天、不接数据库、不修改 Ombre Brain，也暂时不做世界书、心跳或欲望系统。v0.2 增加了一个默认关闭的私人 Telegram 通道。
 
 ## 路线
 
@@ -24,6 +24,42 @@ Claude 官端 ── OAuth /mcp ──────────> Ombre Brain
 - 只对连接失败进行安全重试，避免流式内容重复；
 - 不记录请求正文与任何密钥；
 - 10 MiB 请求体上限，防止异常请求吃光内存。
+
+## v0.2 Telegram 私人通道
+
+- 使用 Telegram Bot API 长轮询，不需要配置 webhook；
+- Token 未配置时完全不启动，不影响现有 `/v1` 网关；
+- 首次只响应 `/start`、`/id`，用于取得自己的 Telegram 数字 ID；
+- 配置 `TELEGRAM_ALLOWED_USER_ID` 后，仅该用户可以聊天；
+- `/reset` 清空当前进程内的 TG 短期上下文；
+- `POST /api/telegram/push` 可发送主动消息，并沿用 `GATEWAY_API_KEY` 鉴权；
+- 不记录用户消息正文、Bot Token 或上游密钥。
+
+### 两阶段启用
+
+第一次部署只添加：
+
+```text
+TELEGRAM_BOT_TOKEN=BotFather 给你的 Token
+```
+
+重新部署后，给机器人发送 `/id`。它只会回复你的 Telegram 数字 ID。然后在 Zeabur 增加：
+
+```text
+TELEGRAM_ALLOWED_USER_ID=机器人回复的数字
+TELEGRAM_SYSTEM_PROMPT=你是景行，正在 Telegram 私聊中与珊珊对话。
+```
+
+再次重新部署后即可正常私聊。`TELEGRAM_SYSTEM_PROMPT` 可以替换为完整角色提示词；长期记忆和 OB 自动召回会在后续版本接入。
+
+主动消息接口示例：
+
+```bash
+curl -X POST https://你的网关域名/api/telegram/push \
+  -H "Authorization: Bearer 你的GATEWAY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"主动消息测试"}'
+```
 
 ## 一键部署到 Zeabur
 
@@ -56,6 +92,11 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `PUBLIC_MODEL_NAME` | 否 | 前端显示的模型名，默认 `shanshan-claude` |
 | `REQUEST_TIMEOUT_SECONDS` | 否 | 上游请求超时，默认 300 秒 |
 | `MAX_REQUEST_BYTES` | 否 | 最大请求体，默认 10 MiB |
+| `TELEGRAM_BOT_TOKEN` | 否 | BotFather 提供的 Token；不填则 TG 通道关闭 |
+| `TELEGRAM_ALLOWED_USER_ID` | 否 | 只允许这个 Telegram 数字用户 ID 使用机器人 |
+| `TELEGRAM_SYSTEM_PROMPT` | 否 | TG 对话专用系统提示词 |
+| `TELEGRAM_HISTORY_MESSAGES` | 否 | 进程内短期上下文条数，默认 24 |
+| `TELEGRAM_POLL_TIMEOUT_SECONDS` | 否 | 长轮询等待时间，默认 30 秒 |
 
 真实密钥只放在 Zeabur 环境变量中，禁止写入仓库。
 

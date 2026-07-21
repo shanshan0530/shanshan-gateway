@@ -20,6 +20,11 @@ class Settings:
     public_model_name: str
     request_timeout_seconds: int
     max_request_bytes: int
+    telegram_bot_token: str = ""
+    telegram_allowed_user_id: str = ""
+    telegram_system_prompt: str = ""
+    telegram_history_messages: int = 24
+    telegram_poll_timeout_seconds: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -32,7 +37,20 @@ class Settings:
             or "shanshan-claude",
             request_timeout_seconds=_positive_int("REQUEST_TIMEOUT_SECONDS", 300),
             max_request_bytes=_positive_int("MAX_REQUEST_BYTES", 10 * 1024 * 1024),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_allowed_user_id=os.getenv("TELEGRAM_ALLOWED_USER_ID", "").strip(),
+            telegram_system_prompt=os.getenv("TELEGRAM_SYSTEM_PROMPT", "").strip(),
+            telegram_history_messages=_positive_int("TELEGRAM_HISTORY_MESSAGES", 24),
+            telegram_poll_timeout_seconds=_positive_int("TELEGRAM_POLL_TIMEOUT_SECONDS", 30),
         )
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return bool(self.telegram_bot_token)
+
+    @property
+    def telegram_authorized(self) -> bool:
+        return bool(self.telegram_allowed_user_id)
 
     def missing_required(self) -> list[str]:
         values = {
