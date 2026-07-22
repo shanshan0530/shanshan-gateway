@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .ombre import OmbreRecallClient, format_memory_context
 from .proxy import chat_completions_url, public_error_message
 from .storage import ConversationStore
 
@@ -26,6 +27,7 @@ class TelegramBridge:
         self._store: ConversationStore | None = None
         self._store_unavailable = False
         self._client: httpx.AsyncClient | None = None
+        self._ombre = OmbreRecallClient(settings)
 
     async def run(self) -> None:
         if not self.settings.telegram_enabled:
@@ -157,6 +159,19 @@ class TelegramBridge:
             await self._send_text(chat_id, "当前 TG 短期对话已经清空。")
             return
 
+        if command == "/memory":
+            query = text.split(maxsplit=1)[1].strip() if " " in text else ""
+            if not query:
+                await self._send_text(chat_id, "用法：/memory 想查找的记忆")
+                return
+            await self._send_action(chat_id, "typing")
+            memory = await self._ombre.recall(query, force=True)
+            await self._send_text(
+                chat_id,
+                memory or "这次没有找到足够相关的 OB 记忆。",
+            )
+            return
+
         await self._send_action(chat_id, "typing")
         try:
             answer = await self._complete(chat_id, text)
@@ -173,6 +188,9 @@ class TelegramBridge:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
             messages.append({"role": "system", "content": self.settings.telegram_system_prompt})
+        memory = await self._ombre.recall(user_text)
+        if memory:
+            messages.append({"role": "system", "content": format_memory_context(memory)})
         messages.extend(self._recent_history(chat_id))
         messages.append({"role": "user", "content": user_text})
 

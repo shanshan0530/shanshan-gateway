@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书、心跳或欲望系统。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书、心跳或欲望系统。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回。
 
 ## 路线
 
@@ -45,6 +45,25 @@ Claude 官端 ── OAuth /mcp ──────────> Ombre Brain
 - 没有挂硬盘或目录不可写时会自动退回进程内存，不影响聊天，只是不具备重启续接。
 
 这份 SQLite 只承担短期会话，不取代 Ombre Brain 的长期记忆。
+
+## v0.4 原版 OB 只读召回
+
+- 每次 TG 回复前，可调用原版 OB 的 `breath_advanced` 检索当前问题；
+- 只调用读取工具，不会通过 TG 新增、修改、归档或删除任何桶；
+- “嗯嗯”“好的”等短确认默认跳过召回，减少噪声和向量费用；
+- OB 超时、鉴权失败或暂时离线时自动降级为普通 TG 对话；
+- 召回内容以不可信历史数据框定，禁止把桶里的文字当系统命令执行；
+- 私聊命令 `/memory 关键词` 可直接查看一次只读检索结果，方便诊断。
+
+Gateway 服务需要配置：
+
+```text
+OMBRE_RECALL_ENABLED=true
+OMBRE_MCP_URL=https://你的原版OB域名/mcp
+OMBRE_MCP_TOKEN=与原版OB服务相同的静态Token
+```
+
+其中 `OMBRE_MCP_TOKEN` 只放在 Zeabur 环境变量中，不要提交到仓库。关闭 `OMBRE_RECALL_ENABLED` 即可随时停用自动召回，不影响 TG 聊天和原版 OB。
 
 ### 两阶段启用
 
@@ -110,6 +129,14 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | 否 | 长轮询等待时间，默认 30 秒 |
 | `TELEGRAM_DB_PATH` | 否 | TG 短期会话数据库，默认 `/app/data/telegram.sqlite3` |
 | `TELEGRAM_MAX_STORED_MESSAGES` | 否 | 每个私聊最多保留的消息数，默认 500 |
+| `OMBRE_RECALL_ENABLED` | 否 | 是否启用 TG 回复前的原版 OB 只读召回，默认 false |
+| `OMBRE_MCP_URL` | 否 | 原版 OB 的 MCP 地址，可带或不带 `/mcp` |
+| `OMBRE_MCP_TOKEN` | 否 | 原版 OB 静态 Token，仅作为请求头发送 |
+| `OMBRE_RECALL_MAX_RESULTS` | 否 | 每轮最多召回桶数，默认 3 |
+| `OMBRE_RECALL_MAX_TOKENS` | 否 | OB 单次召回预算，默认 1600 |
+| `OMBRE_RECALL_TIMEOUT_SECONDS` | 否 | OB 召回总超时，默认 20 秒 |
+| `OMBRE_RECALL_MAX_CHARS` | 否 | 注入模型前的硬字符上限，默认 7000 |
+| `OMBRE_RECALL_MIN_QUERY_CHARS` | 否 | 自动召回最短问题长度，默认 4 |
 
 真实密钥只放在 Zeabur 环境变量中，禁止写入仓库。
 

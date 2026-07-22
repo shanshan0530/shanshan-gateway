@@ -11,6 +11,13 @@ def _positive_int(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     gateway_api_key: str
@@ -27,6 +34,14 @@ class Settings:
     telegram_poll_timeout_seconds: int = 30
     telegram_db_path: str = "/app/data/telegram.sqlite3"
     telegram_max_stored_messages: int = 500
+    ombre_recall_enabled: bool = False
+    ombre_mcp_url: str = ""
+    ombre_mcp_token: str = ""
+    ombre_recall_max_results: int = 3
+    ombre_recall_max_tokens: int = 1600
+    ombre_recall_timeout_seconds: int = 20
+    ombre_recall_max_chars: int = 7000
+    ombre_recall_min_query_chars: int = 4
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -51,6 +66,18 @@ class Settings:
             telegram_max_stored_messages=_positive_int(
                 "TELEGRAM_MAX_STORED_MESSAGES", 500
             ),
+            ombre_recall_enabled=_bool_env("OMBRE_RECALL_ENABLED", False),
+            ombre_mcp_url=os.getenv("OMBRE_MCP_URL", "").strip(),
+            ombre_mcp_token=os.getenv("OMBRE_MCP_TOKEN", "").strip(),
+            ombre_recall_max_results=_positive_int("OMBRE_RECALL_MAX_RESULTS", 3),
+            ombre_recall_max_tokens=_positive_int("OMBRE_RECALL_MAX_TOKENS", 1600),
+            ombre_recall_timeout_seconds=_positive_int(
+                "OMBRE_RECALL_TIMEOUT_SECONDS", 20
+            ),
+            ombre_recall_max_chars=_positive_int("OMBRE_RECALL_MAX_CHARS", 7000),
+            ombre_recall_min_query_chars=_positive_int(
+                "OMBRE_RECALL_MIN_QUERY_CHARS", 4
+            ),
         )
 
     @property
@@ -60,6 +87,14 @@ class Settings:
     @property
     def telegram_authorized(self) -> bool:
         return bool(self.telegram_allowed_user_id)
+
+    @property
+    def ombre_recall_ready(self) -> bool:
+        return bool(
+            self.ombre_recall_enabled
+            and self.ombre_mcp_url
+            and self.ombre_mcp_token
+        )
 
     def missing_required(self) -> list[str]:
         values = {
