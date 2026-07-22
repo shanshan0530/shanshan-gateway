@@ -98,3 +98,17 @@ def test_telegram_heartbeat_uses_sticky_defaults_and_can_be_disabled(monkeypatch
 
     monkeypatch.setenv("TELEGRAM_HEARTBEAT_ENABLED", "false")
     assert not Settings.from_env().telegram_heartbeat_ready
+
+
+def test_device_perception_is_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://memory.example")
+    monkeypatch.setenv("SUPABASE_KEY", "publishable-key")
+    monkeypatch.setenv("ORANGECHAT_ASSISTANT_ID", "assistant-uuid")
+    monkeypatch.delenv("DEVICE_PERCEPTION_ENABLED", raising=False)
+
+    settings = Settings.from_env()
+    assert not settings.device_perception_ready
+    assert settings.device_perception_timezone == "Asia/Taipei"
+
+    monkeypatch.setenv("DEVICE_PERCEPTION_ENABLED", "true")
+    assert Settings.from_env().device_perception_ready

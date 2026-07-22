@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from .config import Settings
+from .perception import PerceptionEvent, derive_perception_events, parse_device_snapshot
 
 
 logger = logging.getLogger("shanshan-gateway.supabase")
@@ -175,6 +176,41 @@ class SupabaseBridge:
         return HeartbeatSignal(
             strong=has_event or (bool(values) and max(values) >= 70),
             has_active_event=has_event,
+        )
+
+    async def perception_events(self) -> tuple[PerceptionEvent, ...]:
+        """Read two device samples and return privacy-safe deltas only."""
+        if not self.settings.device_perception_ready:
+            return ()
+        try:
+            rows = await self._select(
+                "device_data",
+                {
+                    "select": (
+                        "id,timestamp,foreground_app,location_latitude,"
+                        "location_longitude,location_address,location_city,"
+                        "location_district,location_street,app_usage,notifications,"
+                        "device_event,health_data"
+                    ),
+                    "order": "id.desc",
+                    "limit": "2",
+                },
+            )
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning("Device perception unavailable: %s", type(exc).__name__)
+            return ()
+        if len(rows) < 2:
+            return ()
+        current = parse_device_snapshot(
+            rows[0], timezone_name=self.settings.device_perception_timezone
+        )
+        previous = parse_device_snapshot(
+            rows[1], timezone_name=self.settings.device_perception_timezone
+        )
+        return derive_perception_events(
+            previous,
+            current,
+            fingerprint_key=self.settings.gateway_api_key,
         )
 
     async def store_message(

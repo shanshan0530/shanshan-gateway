@@ -71,6 +71,8 @@ class Settings:
     gateway_summary_message_threshold: int = 24
     gateway_summary_max_tokens: int = 1200
     gateway_summary_timeout_seconds: int = 60
+    device_perception_enabled: bool = False
+    device_perception_timezone: str = "Asia/Taipei"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -159,6 +161,13 @@ class Settings:
             gateway_summary_timeout_seconds=_positive_int(
                 "GATEWAY_SUMMARY_TIMEOUT_SECONDS", 60
             ),
+            device_perception_enabled=_bool_env(
+                "DEVICE_PERCEPTION_ENABLED", False
+            ),
+            device_perception_timezone=os.getenv(
+                "DEVICE_PERCEPTION_TIMEZONE", "Asia/Taipei"
+            ).strip()
+            or "Asia/Taipei",
         )
 
     @property
@@ -219,6 +228,10 @@ class Settings:
             and self.upstream_base_url
             and self.upstream_model
         )
+
+    @property
+    def device_perception_ready(self) -> bool:
+        return self.device_perception_enabled and self.supabase_ready
 
     def missing_required(self) -> list[str]:
         values = {

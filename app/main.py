@@ -27,7 +27,7 @@ from .telegram import TelegramBridge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.8.0"
+VERSION = "0.9.0"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
@@ -132,6 +132,10 @@ async def health() -> JSONResponse:
                 "ready": settings.supabase_ready,
                 "continuity": settings.supabase_continuity_ready,
                 "eventide_context": settings.eventide_context_ready,
+                "device_perception": {
+                    "ready": settings.device_perception_ready,
+                    "mode": "observe_only",
+                },
             },
             "gateway_memory": {
                 "available": settings.supabase_continuity_ready,

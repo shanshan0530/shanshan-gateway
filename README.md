@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供 Gateway 全记忆模式；v0.7 增加分批自动总结；v0.8 增加可控的 TG 主动心跳。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供 Gateway 全记忆模式；v0.7 增加分批自动总结；v0.8 增加可控的 TG 主动心跳；v0.9 建立只读设备感知与隐私安全事件层。
 
 ## 路线
 
@@ -152,6 +152,23 @@ TG 私聊命令：
 /heartbeat now      忽略沉默、冷却和安静时段，立即生成一条测试消息
 ```
 
+## v0.9 设备感知基础层（观察模式）
+
+- 从橘瓣现有的 `device_data` 只读获取最新两次同步，不修改插件和原始表；
+- 兼容 `app_usage`、`notifications`、`health_data` 以 JSON 字符串存入 JSONB 的双层格式；
+- 把无时区的设备时间按 `Asia/Taipei` 解释后统一转换为 UTC；
+- 可识别位置区域、前台 App、设备事件和健康采样的变化；
+- 对外事件只包含类别、级别、时间、摘要和密钥化指纹，不携带坐标、地址、App 名、通知正文或健康数值；
+- 当前为 `observe_only`：不注入聊天、不写 OB、不改变 Eventide，也不会触发 TG 主动消息；
+- 默认关闭，等下一阶段加入持久去重、冷却和意图判断后再正式接入心跳。
+
+需要进行结构测试时可在部署环境开启：
+
+```text
+DEVICE_PERCEPTION_ENABLED=true
+DEVICE_PERCEPTION_TIMEZONE=Asia/Taipei
+```
+
 ### 后续路线
 
 - 自动总结之上的纠错和 OB 选择性长期写入；
@@ -251,6 +268,8 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `GATEWAY_SUMMARY_MESSAGE_THRESHOLD` | 否 | 每批触发总结的消息条数，默认 24 |
 | `GATEWAY_SUMMARY_MAX_TOKENS` | 否 | 自动总结单次最大输出预算，默认 1200 |
 | `GATEWAY_SUMMARY_TIMEOUT_SECONDS` | 否 | 自动总结上游请求超时，默认 60 秒 |
+| `DEVICE_PERCEPTION_ENABLED` | 否 | 是否启用只读设备感知基础层，默认 false |
+| `DEVICE_PERCEPTION_TIMEZONE` | 否 | 无时区设备时间的解释时区，默认 `Asia/Taipei` |
 
 真实密钥只放在 Zeabur 环境变量中，禁止写入仓库。
 

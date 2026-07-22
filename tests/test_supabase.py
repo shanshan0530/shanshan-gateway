@@ -325,3 +325,48 @@ def test_latest_user_activity_and_strong_heartbeat_signal():
     assert latest == datetime(2026, 7, 23, 1, 2, 3, tzinfo=timezone.utc)
     assert signal.strong
     assert signal.has_active_event
+
+
+def test_device_perception_reads_two_rows_and_returns_safe_events():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/device_data")
+        assert request.url.params["order"] == "id.desc"
+        assert request.url.params["limit"] == "2"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 2,
+                    "timestamp": "2026-07-23 02:30:00",
+                    "location_district": "new private district",
+                    "health_data": json.dumps({"heartRate": 90}),
+                },
+                {
+                    "id": 1,
+                    "timestamp": "2026-07-23 02:15:00",
+                    "location_district": "old private district",
+                    "health_data": json.dumps({"heartRate": 70}),
+                },
+            ],
+        )
+
+    bridge = SupabaseBridge(
+        supabase_settings(device_perception_enabled=True),
+        transport=httpx.MockTransport(handler),
+    )
+    events = asyncio.run(bridge.perception_events())
+    assert {event.kind for event in events} == {
+        "location_changed",
+        "health_sample_changed",
+    }
+    assert "private district" not in repr(events)
+
+
+def test_device_perception_is_off_until_explicitly_enabled():
+    async def must_not_call(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("disabled perception must not query Supabase")
+
+    bridge = SupabaseBridge(
+        supabase_settings(), transport=httpx.MockTransport(must_not_call)
+    )
+    assert asyncio.run(bridge.perception_events()) == ()
