@@ -12,6 +12,7 @@ from .config import Settings
 from .ombre import OmbreRecallClient, format_memory_context
 from .proxy import chat_completions_url, public_error_message
 from .storage import ConversationStore
+from .supabase import SupabaseBridge, inject_system_context
 
 
 logger = logging.getLogger("shanshan-gateway.telegram")
@@ -28,6 +29,7 @@ class TelegramBridge:
         self._store_unavailable = False
         self._client: httpx.AsyncClient | None = None
         self._ombre = OmbreRecallClient(settings)
+        self._supabase = SupabaseBridge(settings)
 
     async def run(self) -> None:
         if not self.settings.telegram_enabled:
@@ -173,6 +175,10 @@ class TelegramBridge:
             return
 
         await self._send_action(chat_id, "typing")
+        conversation_id = f"tg:{chat_id}"
+        await self._supabase.store_message(
+            role="user", content=text, conversation_id=conversation_id
+        )
         try:
             answer = await self._complete(chat_id, text)
         except Exception as exc:
@@ -182,12 +188,22 @@ class TelegramBridge:
 
         self._remember(chat_id, "user", text)
         self._remember(chat_id, "assistant", answer)
+        await self._supabase.store_message(
+            role="assistant", content=answer, conversation_id=conversation_id
+        )
         await self._send_text(chat_id, answer)
 
     async def _complete(self, chat_id: str, user_text: str) -> str:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
             messages.append({"role": "system", "content": self.settings.telegram_system_prompt})
+        continuity, eventide_context = await asyncio.gather(
+            self._supabase.continuity_context(exclude_conversation_id=f"tg:{chat_id}"),
+            self._supabase.eventide_context(),
+        )
+        payload_context = {"messages": messages}
+        inject_system_context(payload_context, continuity)
+        inject_system_context(payload_context, eventide_context)
         memory = await self._ombre.recall(user_text)
         if memory:
             messages.append({"role": "system", "content": format_memory_context(memory)})

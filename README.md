@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书、心跳或欲望系统。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态。
 
 ## 路线
 
@@ -64,6 +64,26 @@ OMBRE_MCP_TOKEN=与原版OB服务相同的静态Token
 ```
 
 其中 `OMBRE_MCP_TOKEN` 只放在 Zeabur 环境变量中，不要提交到仓库。关闭 `OMBRE_RECALL_ENABLED` 即可随时停用自动召回，不影响 TG 聊天和原版 OB。
+
+## v0.5 Supabase 连续记忆与 Eventide
+
+- TG 收发的 user/assistant 消息同步写入橘瓣现有的 `chat_messages`；
+- TG 回复前读取最近的 `memory_summaries` 与其他渠道对话，换端后仍能接住话题；
+- `/v1/chat/completions` 与 TG 都会自动读取 Eventide 当前周期、短时事件和身体底色；
+- Eventide 只以临时、定性状态注入，不向模型暴露原始数值，也不会把状态写成永久记忆；
+- Supabase 超时或不可用时自动降级，不阻断橘瓣、TG 或上游回复；
+- 橘瓣请求不额外注入 Supabase 历史，避免与橘瓣自身的记忆插件重复。
+
+Zeabur 服务需要增加：
+
+```text
+SUPABASE_URL=https://你的项目.supabase.co
+SUPABASE_KEY=Supabase 的 publishable 或 anon key
+ORANGECHAT_ASSISTANT_ID=橘瓣记录使用的 assistant_id
+EVENTIDE_ASSISTANT_ID=景行
+```
+
+两个功能开关默认开启，可分别设置 `SUPABASE_CONTINUITY_ENABLED=false` 或 `EVENTIDE_CONTEXT_ENABLED=false` 随时回退。真实 Supabase Key 只放在 Zeabur 环境变量中。
 
 ### 两阶段启用
 
@@ -137,6 +157,15 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `OMBRE_RECALL_TIMEOUT_SECONDS` | 否 | OB 召回总超时，默认 20 秒 |
 | `OMBRE_RECALL_MAX_CHARS` | 否 | 注入模型前的硬字符上限，默认 7000 |
 | `OMBRE_RECALL_MIN_QUERY_CHARS` | 否 | 自动召回最短问题长度，默认 4 |
+| `SUPABASE_URL` | 否 | Supabase 项目 URL；与 Key 同时配置后启用 |
+| `SUPABASE_KEY` | 否 | Supabase publishable/anon key，仅放部署环境变量 |
+| `ORANGECHAT_ASSISTANT_ID` | 否 | 橘瓣聊天记录使用的 assistant_id，用于跨端读写 |
+| `EVENTIDE_ASSISTANT_ID` | 否 | Eventide 表中的角色 ID，默认 `景行` |
+| `SUPABASE_CONTINUITY_ENABLED` | 否 | TG 是否读写 Supabase 连续记忆，默认 true |
+| `EVENTIDE_CONTEXT_ENABLED` | 否 | 是否自动注入 Eventide 临时状态，默认 true |
+| `SUPABASE_TIMEOUT_SECONDS` | 否 | 单次 Supabase 请求超时，默认 8 秒 |
+| `SUPABASE_SUMMARY_LIMIT` | 否 | TG 每轮最多读取的近期总结数，默认 3 |
+| `SUPABASE_RECENT_MESSAGE_LIMIT` | 否 | TG 每轮最多读取的跨渠道消息数，默认 8 |
 
 真实密钥只放在 Zeabur 环境变量中，禁止写入仓库。
 

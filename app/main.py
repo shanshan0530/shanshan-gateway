@@ -14,14 +14,17 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import Settings
 from .proxy import chat_completions_url, prepare_payload, public_error_message
+from .supabase import SupabaseBridge, inject_system_context
 from .telegram import TelegramBridge
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
+VERSION = "0.5.0"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
+supabase_bridge = SupabaseBridge(settings)
 telegram_task: asyncio.Task[None] | None = None
 
 
@@ -42,7 +45,7 @@ async def lifespan(_: FastAPI):
             telegram_task = None
 
 
-app = FastAPI(title="Shanshan Gateway", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Shanshan Gateway", version=VERSION, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -69,7 +72,7 @@ def require_auth(
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {"service": "shanshan-gateway", "version": "0.4.0", "status": "ok"}
+    return {"service": "shanshan-gateway", "version": VERSION, "status": "ok"}
 
 
 @app.get("/health")
@@ -87,7 +90,7 @@ async def health() -> JSONResponse:
         status_code=200 if ready else 503,
         content={
             "status": "ok" if ready else "needs_config",
-            "version": "0.4.0",
+            "version": VERSION,
             "missing_env": missing,
             "upstream_url_valid": url_ok,
             "upstream_host": _safe_host(normalized_url),
@@ -98,6 +101,11 @@ async def health() -> JSONResponse:
             "ombre_recall": {
                 "enabled": settings.ombre_recall_enabled,
                 "ready": settings.ombre_recall_ready,
+            },
+            "supabase": {
+                "ready": settings.supabase_ready,
+                "continuity": settings.supabase_continuity_ready,
+                "eventide_context": settings.eventide_context_ready,
             },
         },
     )
@@ -139,6 +147,8 @@ async def chat_completions(request: Request) -> Response:
         raise HTTPException(status_code=400, detail="messages 必须是数组")
 
     prepared = prepare_payload(payload, settings.upstream_model)
+    eventide_context = await supabase_bridge.eventide_context()
+    inject_system_context(prepared, eventide_context)
     logger.info(
         "chat request model=%s stream=%s messages=%d",
         settings.upstream_model,

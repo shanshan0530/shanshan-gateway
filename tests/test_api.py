@@ -25,12 +25,17 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.4.0",
+        "version": "0.5.0",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",
         "telegram": {"enabled": False, "authorized": False},
         "ombre_recall": {"enabled": False, "ready": False},
+        "supabase": {
+            "ready": False,
+            "continuity": False,
+            "eventide_context": False,
+        },
     }
     assert "upstream-secret" not in response.text
 
@@ -71,6 +76,40 @@ def test_chat_maps_model_and_preserves_openai_fields(monkeypatch):
     assert captured["model"] == "claude-real-name"
     assert captured["stream"] is True
     assert captured["tools"][0]["function"]["name"] == "echo"
+
+
+def test_chat_injects_eventide_context_before_upstream(monkeypatch):
+    monkeypatch.setattr(main, "settings", configured_settings())
+    captured = {}
+
+    async def fake_eventide_context():
+        return '<ephemeral_state kind="eventide">状态底色</ephemeral_state>'
+
+    async def fake_forward(payload):
+        captured.update(payload)
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(main.supabase_bridge, "eventide_context", fake_eventide_context)
+    monkeypatch.setattr(main, "forward_to_upstream", fake_forward)
+    response = TestClient(main.app).post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer gateway-secret"},
+        json={
+            "model": "friendly-name",
+            "messages": [
+                {"role": "system", "content": "角色设定"},
+                {"role": "user", "content": "hello"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert [message["role"] for message in captured["messages"]] == [
+        "system",
+        "system",
+        "user",
+    ]
+    assert "状态底色" in captured["messages"][1]["content"]
 
 
 def test_chat_rejects_missing_messages(monkeypatch):

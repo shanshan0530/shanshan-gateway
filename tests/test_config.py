@@ -32,3 +32,30 @@ def test_ombre_recall_is_off_by_default(monkeypatch):
     monkeypatch.setenv("OMBRE_MCP_URL", "https://memory.example/mcp")
     monkeypatch.setenv("OMBRE_MCP_TOKEN", "private-token")
     assert not Settings.from_env().ombre_recall_ready
+
+
+def test_supabase_features_need_url_key_and_assistant_ids(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://memory.example")
+    monkeypatch.setenv("SUPABASE_KEY", "publishable-key")
+    monkeypatch.delenv("ORANGECHAT_ASSISTANT_ID", raising=False)
+    settings = Settings.from_env()
+    assert not settings.supabase_ready
+    assert not settings.supabase_continuity_ready
+    assert settings.eventide_context_ready
+
+    monkeypatch.setenv("ORANGECHAT_ASSISTANT_ID", "assistant-uuid")
+    settings = Settings.from_env()
+    assert settings.supabase_ready
+    assert settings.supabase_continuity_ready
+
+
+def test_supabase_features_can_be_disabled_independently(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://memory.example")
+    monkeypatch.setenv("SUPABASE_KEY", "publishable-key")
+    monkeypatch.setenv("ORANGECHAT_ASSISTANT_ID", "assistant-uuid")
+    monkeypatch.setenv("SUPABASE_CONTINUITY_ENABLED", "false")
+    monkeypatch.setenv("EVENTIDE_CONTEXT_ENABLED", "false")
+    settings = Settings.from_env()
+    assert settings.supabase_ready
+    assert not settings.supabase_continuity_ready
+    assert not settings.eventide_context_ready

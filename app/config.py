@@ -42,6 +42,15 @@ class Settings:
     ombre_recall_timeout_seconds: int = 20
     ombre_recall_max_chars: int = 7000
     ombre_recall_min_query_chars: int = 4
+    supabase_url: str = ""
+    supabase_key: str = ""
+    orangechat_assistant_id: str = ""
+    eventide_assistant_id: str = "景行"
+    supabase_continuity_enabled: bool = True
+    eventide_context_enabled: bool = True
+    supabase_timeout_seconds: int = 8
+    supabase_summary_limit: int = 3
+    supabase_recent_message_limit: int = 8
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -78,6 +87,18 @@ class Settings:
             ombre_recall_min_query_chars=_positive_int(
                 "OMBRE_RECALL_MIN_QUERY_CHARS", 4
             ),
+            supabase_url=os.getenv("SUPABASE_URL", "").strip(),
+            supabase_key=os.getenv("SUPABASE_KEY", "").strip(),
+            orangechat_assistant_id=os.getenv("ORANGECHAT_ASSISTANT_ID", "").strip(),
+            eventide_assistant_id=os.getenv("EVENTIDE_ASSISTANT_ID", "景行").strip()
+            or "景行",
+            supabase_continuity_enabled=_bool_env("SUPABASE_CONTINUITY_ENABLED", True),
+            eventide_context_enabled=_bool_env("EVENTIDE_CONTEXT_ENABLED", True),
+            supabase_timeout_seconds=_positive_int("SUPABASE_TIMEOUT_SECONDS", 8),
+            supabase_summary_limit=_positive_int("SUPABASE_SUMMARY_LIMIT", 3),
+            supabase_recent_message_limit=_positive_int(
+                "SUPABASE_RECENT_MESSAGE_LIMIT", 8
+            ),
         )
 
     @property
@@ -94,6 +115,27 @@ class Settings:
             self.ombre_recall_enabled
             and self.ombre_mcp_url
             and self.ombre_mcp_token
+        )
+
+    @property
+    def supabase_ready(self) -> bool:
+        return bool(
+            self.supabase_url.startswith("https://")
+            and self.supabase_key
+            and self.orangechat_assistant_id
+        )
+
+    @property
+    def supabase_continuity_ready(self) -> bool:
+        return self.supabase_continuity_enabled and self.supabase_ready
+
+    @property
+    def eventide_context_ready(self) -> bool:
+        return bool(
+            self.eventide_context_enabled
+            and self.supabase_url.startswith("https://")
+            and self.supabase_key
+            and self.eventide_assistant_id
         )
 
     def missing_required(self) -> list[str]:
