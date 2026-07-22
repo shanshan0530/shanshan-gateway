@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from app.config import Settings
 from app.supabase import (
+    SummaryBatch,
     SupabaseBridge,
     inject_system_context,
     render_continuity_context,
@@ -199,3 +200,93 @@ def test_supabase_failures_do_not_block_chat():
             role="assistant", content="回复", conversation_id="tg:123"
         )
     )
+
+
+def test_summary_batch_reads_only_next_complete_gateway_chunk():
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, dict(request.url.params)))
+        if request.url.path.endswith("/gateway_summary_checkpoints"):
+            return httpx.Response(200, json=[{"last_message_id": 10}])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": message_id,
+                    "role": "user" if message_id % 2 else "assistant",
+                    "content": f"消息 {message_id}",
+                    "created_at": "2026-07-23T00:00:00Z",
+                }
+                for message_id in range(11, 15)
+            ],
+        )
+
+    bridge = SupabaseBridge(
+        supabase_settings(
+            gateway_summary_message_threshold=4,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    batch = asyncio.run(
+        bridge.summary_batch(conversation_id="gw:orange-island:abc")
+    )
+
+    assert batch is not None
+    assert batch.expected_last_message_id == 10
+    assert batch.last_message_id == 14
+    assert len(batch.messages) == 4
+    assert calls[1][1]["id"] == "gt.10"
+    assert calls[1][1]["conversation_id"] == "eq.gw:orange-island:abc"
+
+
+def test_summary_batch_waits_until_threshold_is_reached():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/gateway_summary_checkpoints"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            200,
+            json=[{"id": 1, "role": "user", "content": "还不够"}],
+        )
+
+    bridge = SupabaseBridge(
+        supabase_settings(gateway_summary_message_threshold=4),
+        transport=httpx.MockTransport(handler),
+    )
+    assert (
+        asyncio.run(bridge.summary_batch(conversation_id="gw:orange-island:abc"))
+        is None
+    )
+
+
+def test_store_memory_summary_uses_atomic_rpc():
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=True)
+
+    bridge = SupabaseBridge(
+        supabase_settings(),
+        transport=httpx.MockTransport(handler),
+    )
+    batch = SummaryBatch(
+        conversation_id="gw:orange-island:abc",
+        expected_last_message_id=10,
+        last_message_id=34,
+        messages=(),
+    )
+    stored = asyncio.run(
+        bridge.store_memory_summary(batch=batch, content="  一段新总结  ")
+    )
+
+    assert stored is True
+    assert captured["path"] == "/rest/v1/rpc/gateway_store_memory_summary"
+    assert captured["payload"] == {
+        "p_assistant_id": "orange-uuid",
+        "p_conversation_id": "gw:orange-island:abc",
+        "p_expected_last_message_id": 10,
+        "p_new_last_message_id": 34,
+        "p_content": "一段新总结",
+    }

@@ -2,12 +2,13 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供可选的 Gateway 全记忆模式。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供可选的 Gateway 全记忆模式；v0.7 为这些新前端增加分批自动总结。
 
 ## 路线
 
 ```text
-新前端 ── /v1 ──> Shanshan Gateway ──> Claude 中转站
+橘瓣 ───── /v1 ──> Shanshan Gateway ──> Claude 中转站
+新前端 ─ /memory/v1 ─> Shanshan Gateway ─> Claude 中转站
 新前端 ── /mcp ─────────────────────> Ombre Brain
 Claude 官端 ── OAuth /mcp ──────────> Ombre Brain
 ```
@@ -72,7 +73,7 @@ OMBRE_MCP_TOKEN=与原版OB服务相同的静态Token
 - `/v1/chat/completions` 与 TG 都会自动读取 Eventide 当前周期、短时事件和身体底色；
 - Eventide 只以临时、定性状态注入，不向模型暴露原始数值，也不会把状态写成永久记忆；
 - Supabase 超时或不可用时自动降级，不阻断橘瓣、TG 或上游回复；
-- 橘瓣请求不额外注入 Supabase 历史，避免与橘瓣自身的记忆插件重复。
+- 橘瓣请求不额外注入 Supabase 历史，避免与橘瓣内置的进阶记忆重复。
 
 Zeabur 服务需要增加：
 
@@ -118,10 +119,22 @@ https://你的网关域名/memory/v1
 
 这个入口会自动启用完整记忆模式，并将默认客户端名称设为 `orange-island`。API Key 与普通 `/v1` 入口相同。橘瓣仍使用普通 `/v1`，不要改到这个专用入口。
 
+## v0.7 新前端分批自动总结
+
+- 只处理 `/memory/v1` 写入且会话 ID 以 `gw:` 开头的新前端对话；
+- 橘瓣原生消息、日记总结、向量和 `BAAI/bge-m3` 召回完全不修改；
+- 默认每累计 24 条 user/assistant 消息，在回复完成后由后台生成一次摘要；
+- 摘要写入现有 `memory_summaries`，之后可被 Gateway 跨端连续记忆读取；
+- 使用数据库检查点与原子写入，重试和并发请求不会重复生成同一批总结；
+- 总结失败只记录安全错误并等待下一轮重试，不阻塞聊天回复；
+- 每 24 条消息增加一次非流式上游调用，可用环境变量关闭或调整阈值。
+
+部署前需应用 `supabase/migrations/202607230002_add_gateway_auto_summary.sql` 与后续修正迁移。生产项目已应用时不需要重复执行。
+
 ### 后续路线
 
-- 全前端原始记录之上的统一总结、纠错和 OB 选择性写入；
-- 基于 Eventide、沉默时长和冷却规则的主动心跳；
+- v0.8：基于 Eventide、沉默时长、安静时段、冷却和每日上限的 TG 主动心跳；
+- 自动总结之上的纠错和 OB 选择性长期写入；
 - 景行自拍语义图库，后续升级为 Gateway 调用生图 API 的动态自拍。
 
 ### 两阶段启用
@@ -205,6 +218,10 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `SUPABASE_TIMEOUT_SECONDS` | 否 | 单次 Supabase 请求超时，默认 8 秒 |
 | `SUPABASE_SUMMARY_LIMIT` | 否 | TG 每轮最多读取的近期总结数，默认 3 |
 | `SUPABASE_RECENT_MESSAGE_LIMIT` | 否 | TG 每轮最多读取的跨渠道消息数，默认 8 |
+| `GATEWAY_AUTO_SUMMARY_ENABLED` | 否 | 是否为 `gw:*` 新前端对话生成分批总结，默认 true |
+| `GATEWAY_SUMMARY_MESSAGE_THRESHOLD` | 否 | 每批触发总结的消息条数，默认 24 |
+| `GATEWAY_SUMMARY_MAX_TOKENS` | 否 | 自动总结单次最大输出预算，默认 1200 |
+| `GATEWAY_SUMMARY_TIMEOUT_SECONDS` | 否 | 自动总结上游请求超时，默认 60 秒 |
 
 真实密钥只放在 Zeabur 环境变量中，禁止写入仓库。
 

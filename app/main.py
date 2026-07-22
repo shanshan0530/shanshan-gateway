@@ -21,18 +21,21 @@ from .gateway_memory import (
 from .ombre import OmbreRecallClient, format_memory_context
 from .proxy import chat_completions_url, prepare_payload, public_error_message
 from .supabase import SupabaseBridge, inject_system_context
+from .summarizer import GatewayAutoSummarizer
 from .telegram import TelegramBridge
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
 supabase_bridge = SupabaseBridge(settings)
 ombre_recall = OmbreRecallClient(settings)
+auto_summarizer = GatewayAutoSummarizer(settings, supabase_bridge)
 telegram_task: asyncio.Task[None] | None = None
+background_tasks: set[asyncio.Task[Any]] = set()
 
 
 @asynccontextmanager
@@ -43,6 +46,11 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        for task in tuple(background_tasks):
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*tuple(background_tasks), return_exceptions=True)
+        background_tasks.clear()
         if telegram_task is not None:
             telegram_task.cancel()
             try:
@@ -118,6 +126,8 @@ async def health() -> JSONResponse:
                 "available": settings.supabase_continuity_ready,
                 "mode_header": "X-Memory-Mode: full",
                 "base_url_path": "/memory/v1",
+                "auto_summary": settings.gateway_auto_summary_ready,
+                "summary_message_threshold": settings.gateway_summary_message_threshold,
             },
         },
     )
@@ -278,7 +288,7 @@ async def forward_to_upstream(
     if memory_request is not None:
         assistant_text = extract_response_text(raw)
         if assistant_text:
-            await supabase_bridge.store_message(
+            stored = await supabase_bridge.store_message(
                 role="assistant",
                 content=assistant_text,
                 conversation_id=memory_request.conversation_id,
@@ -286,6 +296,8 @@ async def forward_to_upstream(
                     "assistant", assistant_text
                 ),
             )
+            if stored:
+                schedule_auto_summary(memory_request.conversation_id)
     return Response(raw, status_code=upstream_response.status_code, media_type=content_type)
 
 
@@ -308,7 +320,7 @@ async def _stream_and_close(
         if completed and collector is not None and memory_request is not None:
             assistant_text = collector.finish()
             if assistant_text:
-                await supabase_bridge.store_message(
+                stored = await supabase_bridge.store_message(
                     role="assistant",
                     content=assistant_text,
                     conversation_id=memory_request.conversation_id,
@@ -316,6 +328,19 @@ async def _stream_and_close(
                         "assistant", assistant_text
                     ),
                 )
+                if stored:
+                    schedule_auto_summary(memory_request.conversation_id)
+
+
+def schedule_auto_summary(conversation_id: str) -> None:
+    if not settings.gateway_auto_summary_ready:
+        return
+    task = asyncio.create_task(
+        auto_summarizer.maybe_summarize(conversation_id),
+        name="gateway-auto-summary",
+    )
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
 
 def _safe_host(url: str) -> str:

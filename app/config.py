@@ -51,6 +51,10 @@ class Settings:
     supabase_timeout_seconds: int = 8
     supabase_summary_limit: int = 3
     supabase_recent_message_limit: int = 8
+    gateway_auto_summary_enabled: bool = True
+    gateway_summary_message_threshold: int = 24
+    gateway_summary_max_tokens: int = 1200
+    gateway_summary_timeout_seconds: int = 60
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -99,6 +103,18 @@ class Settings:
             supabase_recent_message_limit=_positive_int(
                 "SUPABASE_RECENT_MESSAGE_LIMIT", 8
             ),
+            gateway_auto_summary_enabled=_bool_env(
+                "GATEWAY_AUTO_SUMMARY_ENABLED", True
+            ),
+            gateway_summary_message_threshold=_positive_int(
+                "GATEWAY_SUMMARY_MESSAGE_THRESHOLD", 24
+            ),
+            gateway_summary_max_tokens=_positive_int(
+                "GATEWAY_SUMMARY_MAX_TOKENS", 1200
+            ),
+            gateway_summary_timeout_seconds=_positive_int(
+                "GATEWAY_SUMMARY_TIMEOUT_SECONDS", 60
+            ),
         )
 
     @property
@@ -136,6 +152,16 @@ class Settings:
             and self.supabase_url.startswith("https://")
             and self.supabase_key
             and self.eventide_assistant_id
+        )
+
+    @property
+    def gateway_auto_summary_ready(self) -> bool:
+        return bool(
+            self.gateway_auto_summary_enabled
+            and self.supabase_continuity_ready
+            and self.upstream_api_key
+            and self.upstream_base_url
+            and self.upstream_model
         )
 
     def missing_required(self) -> list[str]:

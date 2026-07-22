@@ -59,3 +59,20 @@ def test_supabase_features_can_be_disabled_independently(monkeypatch):
     assert settings.supabase_ready
     assert not settings.supabase_continuity_ready
     assert not settings.eventide_context_ready
+
+
+def test_gateway_auto_summary_needs_supabase_and_upstream(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://memory.example")
+    monkeypatch.setenv("SUPABASE_KEY", "publishable-key")
+    monkeypatch.setenv("ORANGECHAT_ASSISTANT_ID", "assistant-uuid")
+    monkeypatch.setenv("UPSTREAM_API_KEY", "upstream-key")
+    monkeypatch.setenv("UPSTREAM_BASE_URL", "https://relay.example/v1")
+    monkeypatch.setenv("UPSTREAM_MODEL", "claude-model")
+    monkeypatch.delenv("GATEWAY_AUTO_SUMMARY_ENABLED", raising=False)
+
+    settings = Settings.from_env()
+    assert settings.gateway_auto_summary_ready
+    assert settings.gateway_summary_message_threshold == 24
+
+    monkeypatch.setenv("GATEWAY_AUTO_SUMMARY_ENABLED", "false")
+    assert not Settings.from_env().gateway_auto_summary_ready

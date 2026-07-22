@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -23,6 +24,14 @@ _BODY_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 _LEVELS = ("低", "中低", "中", "中高", "高")
+
+
+@dataclass(frozen=True)
+class SummaryBatch:
+    conversation_id: str
+    expected_last_message_id: int
+    last_message_id: int
+    messages: tuple[dict[str, Any], ...]
 
 
 class SupabaseBridge:
@@ -151,6 +160,84 @@ class SupabaseBridge:
             logger.warning("Supabase message persistence failed: %s", type(exc).__name__)
             return False
         return True
+
+    async def summary_batch(self, *, conversation_id: str) -> SummaryBatch | None:
+        """Return the next complete gateway-only chunk waiting for summarization."""
+        if (
+            not self.settings.gateway_auto_summary_ready
+            or not conversation_id.startswith("gw:")
+        ):
+            return None
+        try:
+            checkpoints = await self._select(
+                "gateway_summary_checkpoints",
+                {
+                    "assistant_id": f"eq.{self.settings.orangechat_assistant_id}",
+                    "conversation_id": f"eq.{conversation_id}",
+                    "select": "last_message_id",
+                    "limit": "1",
+                },
+            )
+            expected_last_id = 0
+            if checkpoints:
+                expected_last_id = max(
+                    0, int(checkpoints[0].get("last_message_id") or 0)
+                )
+            rows = await self._select(
+                "chat_messages",
+                {
+                    "assistant_id": f"eq.{self.settings.orangechat_assistant_id}",
+                    "conversation_id": f"eq.{conversation_id}",
+                    "id": f"gt.{expected_last_id}",
+                    "select": "id,role,content,created_at",
+                    "order": "id.asc",
+                    "limit": str(self.settings.gateway_summary_message_threshold),
+                },
+            )
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning("Gateway summary batch unavailable: %s", type(exc).__name__)
+            return None
+        if len(rows) < self.settings.gateway_summary_message_threshold:
+            return None
+        try:
+            last_message_id = int(rows[-1].get("id") or 0)
+        except (TypeError, ValueError):
+            return None
+        if last_message_id <= expected_last_id:
+            return None
+        return SummaryBatch(
+            conversation_id=conversation_id,
+            expected_last_message_id=expected_last_id,
+            last_message_id=last_message_id,
+            messages=tuple(rows),
+        )
+
+    async def store_memory_summary(
+        self,
+        *,
+        batch: SummaryBatch,
+        content: str,
+    ) -> bool:
+        value = content.strip()[:8000]
+        if not self.settings.gateway_auto_summary_ready or not value:
+            return False
+        try:
+            response = await self._request(
+                "POST",
+                "/rest/v1/rpc/gateway_store_memory_summary",
+                json={
+                    "p_assistant_id": self.settings.orangechat_assistant_id,
+                    "p_conversation_id": batch.conversation_id,
+                    "p_expected_last_message_id": batch.expected_last_message_id,
+                    "p_new_last_message_id": batch.last_message_id,
+                    "p_content": value,
+                },
+            )
+            result = response.json()
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning("Gateway summary persistence failed: %s", type(exc).__name__)
+            return False
+        return result is True
 
     async def _select(self, table: str, params: dict[str, str]) -> list[dict[str, Any]]:
         response = await self._request("GET", f"/rest/v1/{table}", params=params)
