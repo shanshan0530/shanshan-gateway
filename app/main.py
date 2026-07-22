@@ -26,7 +26,7 @@ from .telegram import TelegramBridge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
@@ -117,11 +117,13 @@ async def health() -> JSONResponse:
             "gateway_memory": {
                 "available": settings.supabase_continuity_ready,
                 "mode_header": "X-Memory-Mode: full",
+                "base_url_path": "/memory/v1",
             },
         },
     )
 
 
+@app.get("/memory/v1/models", dependencies=[Depends(require_auth)])
 @app.get("/v1/models", dependencies=[Depends(require_auth)])
 async def models() -> dict[str, Any]:
     return {
@@ -137,6 +139,7 @@ async def models() -> dict[str, Any]:
     }
 
 
+@app.post("/memory/v1/chat/completions", dependencies=[Depends(require_auth)])
 @app.post("/v1/chat/completions", dependencies=[Depends(require_auth)])
 async def chat_completions(request: Request) -> Response:
     missing = settings.missing_required()
@@ -157,7 +160,11 @@ async def chat_completions(request: Request) -> Response:
     if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
         raise HTTPException(status_code=400, detail="messages 必须是数组")
 
-    memory_request = GatewayMemoryRequest.from_payload(payload, request.headers)
+    memory_headers = dict(request.headers)
+    if request.url.path.startswith("/memory/"):
+        memory_headers["x-memory-mode"] = "full"
+        memory_headers.setdefault("x-client-name", "orange-island")
+    memory_request = GatewayMemoryRequest.from_payload(payload, memory_headers)
     if memory_request.enabled and memory_request.user_text:
         await supabase_bridge.store_message(
             role="user",

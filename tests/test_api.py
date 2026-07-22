@@ -28,7 +28,7 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.6.0",
+        "version": "0.6.1",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",
@@ -42,6 +42,7 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
         "gateway_memory": {
             "available": False,
             "mode_header": "X-Memory-Mode: full",
+            "base_url_path": "/memory/v1",
         },
     }
     assert "upstream-secret" not in response.text
@@ -182,6 +183,57 @@ def test_full_memory_mode_archives_user_and_injects_all_contexts(monkeypatch):
         "想起我们昨天聊的事",
     ]
     assert captured["memory_request"].enabled
+
+
+def test_memory_base_url_enables_full_mode_without_custom_headers(monkeypatch):
+    monkeypatch.setattr(main, "settings", configured_settings())
+    stored = []
+    captured = {}
+
+    async def fake_store_message(**kwargs):
+        stored.append(kwargs)
+        return True
+
+    async def fake_context(**kwargs):
+        return ""
+
+    async def fake_recall(query):
+        return ""
+
+    async def fake_forward(payload, **kwargs):
+        captured["memory_request"] = kwargs.get("memory_request")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(main.supabase_bridge, "store_message", fake_store_message)
+    monkeypatch.setattr(main.supabase_bridge, "continuity_context", fake_context)
+    monkeypatch.setattr(main.supabase_bridge, "eventide_context", fake_context)
+    monkeypatch.setattr(main.ombre_recall, "recall", fake_recall)
+    monkeypatch.setattr(main, "forward_to_upstream", fake_forward)
+
+    response = TestClient(main.app).post(
+        "/memory/v1/chat/completions",
+        headers={"Authorization": "Bearer gateway-secret"},
+        json={
+            "model": "friendly-name",
+            "messages": [{"role": "user", "content": "新家也要记得我"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert stored[0]["role"] == "user"
+    assert stored[0]["conversation_id"].startswith("gw:orange-island:")
+    assert captured["memory_request"].enabled
+    assert captured["memory_request"].client_name == "orange-island"
+
+
+def test_memory_base_url_lists_models(monkeypatch):
+    monkeypatch.setattr(main, "settings", configured_settings())
+    response = TestClient(main.app).get(
+        "/memory/v1/models",
+        headers={"Authorization": "Bearer gateway-secret"},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"][0]["id"] == "shanshan-claude"
 
 
 def test_chat_rejects_missing_messages(monkeypatch):
