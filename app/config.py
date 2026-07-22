@@ -71,8 +71,11 @@ class Settings:
     gateway_summary_message_threshold: int = 24
     gateway_summary_max_tokens: int = 1200
     gateway_summary_timeout_seconds: int = 60
-    device_perception_enabled: bool = False
+    device_perception_enabled: bool = True
     device_perception_timezone: str = "Asia/Taipei"
+    device_perception_check_seconds: int = 900
+    device_perception_cooldown_minutes: int = 180
+    device_perception_db_path: str = "/app/data/telegram.sqlite3"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -162,12 +165,23 @@ class Settings:
                 "GATEWAY_SUMMARY_TIMEOUT_SECONDS", 60
             ),
             device_perception_enabled=_bool_env(
-                "DEVICE_PERCEPTION_ENABLED", False
+                "DEVICE_PERCEPTION_ENABLED", True
             ),
             device_perception_timezone=os.getenv(
                 "DEVICE_PERCEPTION_TIMEZONE", "Asia/Taipei"
             ).strip()
             or "Asia/Taipei",
+            device_perception_check_seconds=_positive_int(
+                "DEVICE_PERCEPTION_CHECK_SECONDS", 900
+            ),
+            device_perception_cooldown_minutes=_positive_int(
+                "DEVICE_PERCEPTION_COOLDOWN_MINUTES", 180
+            ),
+            device_perception_db_path=os.getenv(
+                "DEVICE_PERCEPTION_DB_PATH",
+                os.getenv("TELEGRAM_DB_PATH", "/app/data/telegram.sqlite3"),
+            ).strip()
+            or "/app/data/telegram.sqlite3",
         )
 
     @property

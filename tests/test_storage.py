@@ -62,3 +62,58 @@ def test_last_message_at_returns_latest_role_timestamp(tmp_path):
     store.append("123", "user", "你好")
     assert store.last_message_at("123", "user") is not None
     assert store.last_message_at("123", "assistant") is None
+
+
+def test_perception_shadow_state_persists_checkpoint_and_cooldown(tmp_path):
+    db_path = tmp_path / "telegram.sqlite3"
+    store = ConversationStore(str(db_path))
+    first_at = datetime(2026, 7, 23, 1, 0, tzinfo=timezone.utc)
+
+    state, eligible, processed = store.record_perception_scan(
+        latest_row_id=10,
+        events=(("location_changed", "fingerprint-a"),),
+        checked_at=first_at,
+        cooldown_minutes=180,
+    )
+    assert processed
+    assert eligible == ("location_changed",)
+    assert state.total_scans == 1
+    assert state.total_detected_events == 1
+    assert state.total_eligible_events == 1
+
+    duplicate, eligible, processed = store.record_perception_scan(
+        latest_row_id=10,
+        events=(("location_changed", "fingerprint-a"),),
+        checked_at=first_at + timedelta(minutes=15),
+        cooldown_minutes=180,
+    )
+    assert not processed
+    assert eligible == ()
+    assert duplicate.total_scans == 1
+
+    suppressed, eligible, processed = store.record_perception_scan(
+        latest_row_id=11,
+        events=(("location_changed", "fingerprint-a"),),
+        checked_at=first_at + timedelta(minutes=30),
+        cooldown_minutes=180,
+    )
+    assert processed
+    assert eligible == ()
+    assert suppressed.total_scans == 2
+    assert suppressed.total_detected_events == 2
+    assert suppressed.total_eligible_events == 1
+
+    released, eligible, processed = store.record_perception_scan(
+        latest_row_id=12,
+        events=(("location_changed", "fingerprint-a"),),
+        checked_at=first_at + timedelta(hours=4),
+        cooldown_minutes=180,
+    )
+    assert processed
+    assert eligible == ("location_changed",)
+    assert released.total_eligible_events == 2
+
+    reopened = ConversationStore(str(db_path)).perception_shadow_state()
+    assert reopened.last_row_id == 12
+    assert reopened.total_scans == 3
+    assert reopened.event_counts == {"location_changed": 3}

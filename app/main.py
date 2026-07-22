@@ -19,6 +19,7 @@ from .gateway_memory import (
     extract_response_text,
 )
 from .ombre import OmbreRecallClient, format_memory_context
+from .perception_observer import PerceptionObserver
 from .proxy import chat_completions_url, prepare_payload, public_error_message
 from .supabase import SupabaseBridge, inject_system_context
 from .summarizer import GatewayAutoSummarizer
@@ -27,22 +28,28 @@ from .telegram import TelegramBridge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
 supabase_bridge = SupabaseBridge(settings)
 ombre_recall = OmbreRecallClient(settings)
 auto_summarizer = GatewayAutoSummarizer(settings, supabase_bridge)
+perception_observer = PerceptionObserver(settings, supabase_bridge)
 telegram_task: asyncio.Task[None] | None = None
+perception_task: asyncio.Task[None] | None = None
 background_tasks: set[asyncio.Task[Any]] = set()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global telegram_task
+    global perception_task, telegram_task
     if settings.telegram_enabled:
         telegram_task = asyncio.create_task(telegram_bridge.run(), name="telegram-bridge")
+    if settings.device_perception_ready:
+        perception_task = asyncio.create_task(
+            perception_observer.run(), name="perception-shadow"
+        )
     try:
         yield
     finally:
@@ -58,6 +65,13 @@ async def lifespan(_: FastAPI):
             except asyncio.CancelledError:
                 pass
             telegram_task = None
+        if perception_task is not None:
+            perception_task.cancel()
+            try:
+                await perception_task
+            except asyncio.CancelledError:
+                pass
+            perception_task = None
 
 
 app = FastAPI(title="Shanshan Gateway", version=VERSION, lifespan=lifespan)
@@ -134,7 +148,9 @@ async def health() -> JSONResponse:
                 "eventide_context": settings.eventide_context_ready,
                 "device_perception": {
                     "ready": settings.device_perception_ready,
-                    "mode": "observe_only",
+                    "mode": "shadow",
+                    "check_seconds": settings.device_perception_check_seconds,
+                    "cooldown_minutes": settings.device_perception_cooldown_minutes,
                 },
             },
             "gateway_memory": {
@@ -245,6 +261,29 @@ async def telegram_push(request: Request) -> JSONResponse:
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/perception/status", dependencies=[Depends(require_auth)])
+async def perception_status() -> JSONResponse:
+    state = perception_observer.status()
+    return JSONResponse(
+        {
+            "ready": settings.device_perception_ready,
+            "mode": "shadow",
+            "last_row_id": state.last_row_id if state is not None else 0,
+            "last_checked_at": (
+                state.last_checked_at.isoformat() if state and state.last_checked_at else None
+            ),
+            "total_scans": state.total_scans if state is not None else 0,
+            "total_detected_events": (
+                state.total_detected_events if state is not None else 0
+            ),
+            "total_eligible_events": (
+                state.total_eligible_events if state is not None else 0
+            ),
+            "event_counts": state.event_counts if state is not None else {},
+        }
+    )
 
 
 async def forward_to_upstream(

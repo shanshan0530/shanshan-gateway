@@ -57,6 +57,13 @@ class PerceptionEvent:
     changed_fields: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PerceptionScan:
+    latest_row_id: int
+    captured_at: datetime | None
+    events: tuple[PerceptionEvent, ...]
+
+
 def parse_device_snapshot(
     row: dict[str, Any],
     *,

@@ -362,11 +362,12 @@ def test_device_perception_reads_two_rows_and_returns_safe_events():
     assert "private district" not in repr(events)
 
 
-def test_device_perception_is_off_until_explicitly_enabled():
+def test_device_perception_can_be_disabled_independently():
     async def must_not_call(_: httpx.Request) -> httpx.Response:
         raise AssertionError("disabled perception must not query Supabase")
 
     bridge = SupabaseBridge(
-        supabase_settings(), transport=httpx.MockTransport(must_not_call)
+        supabase_settings(device_perception_enabled=False),
+        transport=httpx.MockTransport(must_not_call),
     )
     assert asyncio.run(bridge.perception_events()) == ()

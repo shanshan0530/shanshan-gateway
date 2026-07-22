@@ -159,15 +159,29 @@ TG 私聊命令：
 - 把无时区的设备时间按 `Asia/Taipei` 解释后统一转换为 UTC；
 - 可识别位置区域、前台 App、设备事件和健康采样的变化；
 - 对外事件只包含类别、级别、时间、摘要和密钥化指纹，不携带坐标、地址、App 名、通知正文或健康数值；
-- 当前为 `observe_only`：不注入聊天、不写 OB、不改变 Eventide，也不会触发 TG 主动消息；
-- 默认关闭，等下一阶段加入持久去重、冷却和意图判断后再正式接入心跳。
+- 当前为 `shadow`：不注入聊天、不写 OB、不改变 Eventide，也不会触发 TG 主动消息；
+- 每 15 分钟观察一次，只把最后处理行、事件类型、密钥化指纹与计数保存进现有 SQLite；
+- 同一状态默认冷却 180 分钟，重复扫描和容器重启不会重复计为新的候选事件；
+- 指纹明细只保留 7 天，SQLite 不保存坐标、地址、App 名、通知正文或健康数值；
+- 影子观察默认开启；可随时设置 `DEVICE_PERCEPTION_ENABLED=false` 单独停用。
 
 需要进行结构测试时可在部署环境开启：
 
 ```text
 DEVICE_PERCEPTION_ENABLED=true
 DEVICE_PERCEPTION_TIMEZONE=Asia/Taipei
+DEVICE_PERCEPTION_CHECK_SECONDS=900
+DEVICE_PERCEPTION_COOLDOWN_MINUTES=180
+DEVICE_PERCEPTION_DB_PATH=/app/data/telegram.sqlite3
 ```
+
+影子统计可通过受 `GATEWAY_API_KEY` 保护的接口查看：
+
+```text
+GET /api/perception/status
+```
+
+它只返回检查点、扫描次数和事件类型计数，不返回事件指纹或任何原始设备值。
 
 ### 后续路线
 
@@ -268,8 +282,11 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `GATEWAY_SUMMARY_MESSAGE_THRESHOLD` | 否 | 每批触发总结的消息条数，默认 24 |
 | `GATEWAY_SUMMARY_MAX_TOKENS` | 否 | 自动总结单次最大输出预算，默认 1200 |
 | `GATEWAY_SUMMARY_TIMEOUT_SECONDS` | 否 | 自动总结上游请求超时，默认 60 秒 |
-| `DEVICE_PERCEPTION_ENABLED` | 否 | 是否启用只读设备感知基础层，默认 false |
+| `DEVICE_PERCEPTION_ENABLED` | 否 | 是否启用只读设备感知影子层，默认 true |
 | `DEVICE_PERCEPTION_TIMEZONE` | 否 | 无时区设备时间的解释时区，默认 `Asia/Taipei` |
+| `DEVICE_PERCEPTION_CHECK_SECONDS` | 否 | 影子观察间隔，默认 900 秒 |
+| `DEVICE_PERCEPTION_COOLDOWN_MINUTES` | 否 | 相同状态重新成为候选前的冷却，默认 180 分钟 |
+| `DEVICE_PERCEPTION_DB_PATH` | 否 | 感知检查点 SQLite 路径，默认复用 `/app/data/telegram.sqlite3` |
 
 真实密钥只放在 Zeabur 环境变量中，禁止写入仓库。
 

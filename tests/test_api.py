@@ -1,10 +1,12 @@
 import asyncio
+from datetime import datetime, timezone
 
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.gateway_memory import GatewayMemoryRequest
+from app.storage import PerceptionShadowState
 from app import main
 
 
@@ -28,7 +30,7 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.9.0",
+        "version": "0.9.1",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",
@@ -51,7 +53,9 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
             "eventide_context": False,
             "device_perception": {
                 "ready": False,
-                "mode": "observe_only",
+                "mode": "shadow",
+                "check_seconds": 900,
+                "cooldown_minutes": 180,
             },
         },
         "gateway_memory": {
@@ -76,6 +80,51 @@ def test_models_requires_gateway_key(monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["data"][0]["id"] == "shanshan-claude"
+
+
+def test_perception_status_is_authenticated_and_contains_only_safe_counts(monkeypatch):
+    settings = configured_settings(
+        supabase_url="https://memory.example",
+        supabase_key="publishable-key",
+        orangechat_assistant_id="assistant-id",
+        device_perception_enabled=True,
+    )
+    monkeypatch.setattr(main, "settings", settings)
+    monkeypatch.setattr(main.perception_observer, "settings", settings)
+    monkeypatch.setattr(
+        main.perception_observer,
+        "status",
+        lambda: PerceptionShadowState(
+            last_row_id=42,
+            last_checked_at=datetime(2026, 7, 23, 1, 0, tzinfo=timezone.utc),
+            total_scans=3,
+            total_detected_events=4,
+            total_eligible_events=2,
+            event_counts={"location_changed": 2, "health_sample_changed": 2},
+        ),
+    )
+    client = TestClient(main.app)
+    assert client.get("/api/perception/status").status_code == 401
+    response = client.get(
+        "/api/perception/status",
+        headers={"Authorization": "Bearer gateway-secret"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "ready": True,
+        "mode": "shadow",
+        "last_row_id": 42,
+        "last_checked_at": "2026-07-23T01:00:00+00:00",
+        "total_scans": 3,
+        "total_detected_events": 4,
+        "total_eligible_events": 2,
+        "event_counts": {
+            "location_changed": 2,
+            "health_sample_changed": 2,
+        },
+    }
+    assert "fingerprint" not in response.text
+    assert "address" not in response.text
 
 
 def test_chat_maps_model_and_preserves_openai_fields(monkeypatch):
