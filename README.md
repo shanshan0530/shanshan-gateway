@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供可选的 Gateway 全记忆模式。
 
 ## 路线
 
@@ -84,6 +84,35 @@ EVENTIDE_ASSISTANT_ID=景行
 ```
 
 两个功能开关默认开启，可分别设置 `SUPABASE_CONTINUITY_ENABLED=false` 或 `EVENTIDE_CONTEXT_ENABLED=false` 随时回退。真实 Supabase Key 只放在 Zeabur 环境变量中。
+
+## v0.6 新前端全记忆模式
+
+橘瓣已经自行同步 Supabase，因此默认请求仍保持 v0.5 行为，不会重复存档。缺少原生记忆的新前端可以在自定义请求头中添加：
+
+```json
+{
+  "X-Memory-Mode": "full",
+  "X-Client-Name": "orange-island"
+}
+```
+
+启用后，Gateway 会：
+
+- 只保存当前最新的 user 消息，不重复导入前端每轮携带的完整历史；
+- 在非流式或流式回复完成后保存完整 assistant 回复；
+- 使用本轮消息指纹幂等去重，网络重试不会产生重复记录；
+- 自动读取 Supabase 近期总结、其他渠道最近对话、OB 召回和 Eventide 状态；
+- 任一记忆服务暂时失败时继续转发聊天，不阻塞回复。
+
+如果前端支持动态会话 ID，可额外发送 `X-Conversation-ID`。若不支持，Gateway 会根据客户端名称、首条系统消息与首条用户消息生成稳定的匿名会话标识。请求头中的原始会话名称只参与哈希，不会写入数据库。
+
+`X-Client-Name` 仅用于区分来源，可自行取名。不要给橘瓣现有连接添加 `X-Memory-Mode: full`，否则会与橘瓣自己的 Supabase 插件形成双重存档。
+
+### 后续路线
+
+- 全前端原始记录之上的统一总结、纠错和 OB 选择性写入；
+- 基于 Eventide、沉默时长和冷却规则的主动心跳；
+- 景行自拍语义图库，后续升级为 Gateway 调用生图 API 的动态自拍。
 
 ### 两阶段启用
 

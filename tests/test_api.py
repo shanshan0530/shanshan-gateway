@@ -1,7 +1,10 @@
+import asyncio
+
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.gateway_memory import GatewayMemoryRequest
 from app import main
 
 
@@ -25,7 +28,7 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",
@@ -35,6 +38,10 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
             "ready": False,
             "continuity": False,
             "eventide_context": False,
+        },
+        "gateway_memory": {
+            "available": False,
+            "mode_header": "X-Memory-Mode: full",
         },
     }
     assert "upstream-secret" not in response.text
@@ -57,7 +64,7 @@ def test_chat_maps_model_and_preserves_openai_fields(monkeypatch):
     monkeypatch.setattr(main, "settings", configured_settings())
     captured = {}
 
-    async def fake_forward(payload):
+    async def fake_forward(payload, **kwargs):
         captured.update(payload)
         return JSONResponse({"ok": True})
 
@@ -85,7 +92,7 @@ def test_chat_injects_eventide_context_before_upstream(monkeypatch):
     async def fake_eventide_context():
         return '<ephemeral_state kind="eventide">状态底色</ephemeral_state>'
 
-    async def fake_forward(payload):
+    async def fake_forward(payload, **kwargs):
         captured.update(payload)
         return JSONResponse({"ok": True})
 
@@ -110,6 +117,71 @@ def test_chat_injects_eventide_context_before_upstream(monkeypatch):
         "user",
     ]
     assert "状态底色" in captured["messages"][1]["content"]
+
+
+def test_full_memory_mode_archives_user_and_injects_all_contexts(monkeypatch):
+    monkeypatch.setattr(main, "settings", configured_settings())
+    stored = []
+    captured = {}
+
+    async def fake_store_message(**kwargs):
+        stored.append(kwargs)
+        return True
+
+    async def fake_continuity_context(**kwargs):
+        return "SUPABASE-CONTINUITY"
+
+    async def fake_eventide_context():
+        return "EVENTIDE-STATE"
+
+    async def fake_recall(query):
+        assert query == "想起我们昨天聊的事"
+        return "OMBRE-RECALL"
+
+    async def fake_forward(payload, **kwargs):
+        captured["payload"] = payload
+        captured["memory_request"] = kwargs.get("memory_request")
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(main.supabase_bridge, "store_message", fake_store_message)
+    monkeypatch.setattr(
+        main.supabase_bridge, "continuity_context", fake_continuity_context
+    )
+    monkeypatch.setattr(main.supabase_bridge, "eventide_context", fake_eventide_context)
+    monkeypatch.setattr(main.ombre_recall, "recall", fake_recall)
+    monkeypatch.setattr(main, "forward_to_upstream", fake_forward)
+
+    response = TestClient(main.app).post(
+        "/v1/chat/completions",
+        headers={
+            "Authorization": "Bearer gateway-secret",
+            "X-Memory-Mode": "full",
+            "X-Client-Name": "orange-island",
+            "X-Conversation-ID": "thread-123",
+        },
+        json={
+            "model": "friendly-name",
+            "messages": [
+                {"role": "system", "content": "角色设定"},
+                {"role": "user", "content": "想起我们昨天聊的事"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert stored[0]["role"] == "user"
+    assert stored[0]["content"] == "想起我们昨天聊的事"
+    assert stored[0]["conversation_id"].startswith("gw:orange-island:")
+    assert len(stored[0]["fingerprint"]) == 64
+    contents = [message["content"] for message in captured["payload"]["messages"]]
+    assert contents == [
+        "角色设定",
+        "SUPABASE-CONTINUITY",
+        main.format_memory_context("OMBRE-RECALL"),
+        "EVENTIDE-STATE",
+        "想起我们昨天聊的事",
+    ]
+    assert captured["memory_request"].enabled
 
 
 def test_chat_rejects_missing_messages(monkeypatch):
@@ -144,3 +216,45 @@ def test_telegram_push_sends_to_private_user(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {"ok": True}
     assert sent == ["主动消息测试"]
+
+
+def test_stream_completion_is_archived_after_normal_finish(monkeypatch):
+    stored = []
+
+    class FakeResponse:
+        async def aiter_raw(self):
+            yield 'data: {"choices":[{"delta":{"content":"回来"}}]}\n'.encode()
+            yield 'data: {"choices":[{"delta":{"content":"了。"}}]}\n\n'.encode()
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            return None
+
+    class FakeClient:
+        async def aclose(self):
+            return None
+
+    async def fake_store_message(**kwargs):
+        stored.append(kwargs)
+        return True
+
+    request = GatewayMemoryRequest.from_payload(
+        {"messages": [{"role": "user", "content": "我回来啦"}]},
+        {"x-memory-mode": "full", "x-client-name": "new-app"},
+    )
+    monkeypatch.setattr(main.supabase_bridge, "store_message", fake_store_message)
+
+    async def consume():
+        return [
+            chunk
+            async for chunk in main._stream_and_close(
+                FakeResponse(), FakeClient(), request
+            )
+        ]
+
+    chunks = asyncio.run(consume())
+    assert b"".join(chunks).endswith(b"data: [DONE]\n\n")
+    assert stored[0]["role"] == "assistant"
+    assert stored[0]["content"] == "回来了。"
+    assert stored[0]["conversation_id"].startswith("gw:new-app:")
+    assert len(stored[0]["fingerprint"]) == 64

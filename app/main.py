@@ -13,6 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import Settings
+from .gateway_memory import (
+    GatewayMemoryRequest,
+    OpenAIStreamTextCollector,
+    extract_response_text,
+)
+from .ombre import OmbreRecallClient, format_memory_context
 from .proxy import chat_completions_url, prepare_payload, public_error_message
 from .supabase import SupabaseBridge, inject_system_context
 from .telegram import TelegramBridge
@@ -20,11 +26,12 @@ from .telegram import TelegramBridge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
 supabase_bridge = SupabaseBridge(settings)
+ombre_recall = OmbreRecallClient(settings)
 telegram_task: asyncio.Task[None] | None = None
 
 
@@ -107,6 +114,10 @@ async def health() -> JSONResponse:
                 "continuity": settings.supabase_continuity_ready,
                 "eventide_context": settings.eventide_context_ready,
             },
+            "gateway_memory": {
+                "available": settings.supabase_continuity_ready,
+                "mode_header": "X-Memory-Mode: full",
+            },
         },
     )
 
@@ -146,16 +157,44 @@ async def chat_completions(request: Request) -> Response:
     if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
         raise HTTPException(status_code=400, detail="messages 必须是数组")
 
+    memory_request = GatewayMemoryRequest.from_payload(payload, request.headers)
+    if memory_request.enabled and memory_request.user_text:
+        await supabase_bridge.store_message(
+            role="user",
+            content=memory_request.user_text,
+            conversation_id=memory_request.conversation_id,
+            fingerprint=memory_request.message_fingerprint(
+                "user", memory_request.user_text
+            ),
+        )
+
     prepared = prepare_payload(payload, settings.upstream_model)
-    eventide_context = await supabase_bridge.eventide_context()
+    if memory_request.enabled:
+        continuity, eventide_context, recalled_memory = await asyncio.gather(
+            supabase_bridge.continuity_context(
+                exclude_conversation_id=memory_request.conversation_id
+            ),
+            supabase_bridge.eventide_context(),
+            ombre_recall.recall(memory_request.user_text),
+        )
+        inject_system_context(prepared, continuity)
+        if recalled_memory:
+            inject_system_context(prepared, format_memory_context(recalled_memory))
+    else:
+        eventide_context = await supabase_bridge.eventide_context()
     inject_system_context(prepared, eventide_context)
     logger.info(
-        "chat request model=%s stream=%s messages=%d",
+        "chat request model=%s stream=%s messages=%d memory_mode=%s client=%s",
         settings.upstream_model,
         bool(prepared.get("stream")),
         len(prepared["messages"]),
+        "full" if memory_request.enabled else "frontend",
+        memory_request.client_name,
     )
-    return await forward_to_upstream(prepared)
+    return await forward_to_upstream(
+        prepared,
+        memory_request=memory_request if memory_request.enabled else None,
+    )
 
 
 @app.post("/api/telegram/push", dependencies=[Depends(require_auth)])
@@ -176,7 +215,11 @@ async def telegram_push(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-async def forward_to_upstream(payload: dict[str, Any]) -> Response:
+async def forward_to_upstream(
+    payload: dict[str, Any],
+    *,
+    memory_request: GatewayMemoryRequest | None = None,
+) -> Response:
     try:
         url = chat_completions_url(settings.upstream_base_url)
     except ValueError as exc:
@@ -215,7 +258,7 @@ async def forward_to_upstream(payload: dict[str, Any]) -> Response:
 
     if payload.get("stream"):
         return StreamingResponse(
-            _stream_and_close(upstream_response, client),
+            _stream_and_close(upstream_response, client, memory_request),
             status_code=upstream_response.status_code,
             media_type=upstream_response.headers.get("content-type", "text/event-stream"),
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -225,19 +268,47 @@ async def forward_to_upstream(payload: dict[str, Any]) -> Response:
     content_type = upstream_response.headers.get("content-type", "application/json")
     await upstream_response.aclose()
     await client.aclose()
+    if memory_request is not None:
+        assistant_text = extract_response_text(raw)
+        if assistant_text:
+            await supabase_bridge.store_message(
+                role="assistant",
+                content=assistant_text,
+                conversation_id=memory_request.conversation_id,
+                fingerprint=memory_request.message_fingerprint(
+                    "assistant", assistant_text
+                ),
+            )
     return Response(raw, status_code=upstream_response.status_code, media_type=content_type)
 
 
 async def _stream_and_close(
     upstream_response: httpx.Response,
     client: httpx.AsyncClient,
+    memory_request: GatewayMemoryRequest | None = None,
 ) -> AsyncIterator[bytes]:
+    collector = OpenAIStreamTextCollector() if memory_request is not None else None
+    completed = False
     try:
         async for chunk in upstream_response.aiter_raw():
+            if collector is not None:
+                collector.feed(chunk)
             yield chunk
+        completed = True
     finally:
         await upstream_response.aclose()
         await client.aclose()
+        if completed and collector is not None and memory_request is not None:
+            assistant_text = collector.finish()
+            if assistant_text:
+                await supabase_bridge.store_message(
+                    role="assistant",
+                    content=assistant_text,
+                    conversation_id=memory_request.conversation_id,
+                    fingerprint=memory_request.message_fingerprint(
+                        "assistant", assistant_text
+                    ),
+                )
 
 
 def _safe_host(url: str) -> str:

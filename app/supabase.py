@@ -114,6 +114,7 @@ class SupabaseBridge:
         role: str,
         content: str,
         conversation_id: str,
+        fingerprint: str = "",
     ) -> bool:
         if not self.settings.supabase_continuity_ready:
             return False
@@ -126,12 +127,26 @@ class SupabaseBridge:
             "conversation_id": conversation_id,
         }
         try:
-            await self._request(
-                "POST",
-                "/rest/v1/chat_messages",
-                json=row,
-                extra_headers={"Prefer": "return=minimal"},
-            )
+            if fingerprint:
+                await self._request(
+                    "POST",
+                    "/rest/v1/rpc/gateway_store_chat_message",
+                    json={
+                        "p_fingerprint": fingerprint,
+                        "p_role": row["role"],
+                        "p_content": row["content"],
+                        "p_assistant_id": row["assistant_id"],
+                        "p_conversation_id": row["conversation_id"],
+                    },
+                    extra_headers={"Prefer": "return=minimal"},
+                )
+            else:
+                await self._request(
+                    "POST",
+                    "/rest/v1/chat_messages",
+                    json=row,
+                    extra_headers={"Prefer": "return=minimal"},
+                )
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             logger.warning("Supabase message persistence failed: %s", type(exc).__name__)
             return False

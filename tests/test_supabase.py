@@ -155,6 +155,36 @@ def test_store_message_uses_orangechat_assistant_mapping():
     assert captured["headers"]["prefer"] == "return=minimal"
 
 
+def test_store_message_with_fingerprint_uses_dedup_rpc():
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json=True)
+
+    bridge = SupabaseBridge(
+        supabase_settings(), transport=httpx.MockTransport(handler)
+    )
+    stored = asyncio.run(
+        bridge.store_message(
+            role="assistant",
+            content="回复",
+            conversation_id="gw:new-app:123",
+            fingerprint="a" * 64,
+        )
+    )
+    assert stored is True
+    assert captured["path"] == "/rest/v1/rpc/gateway_store_chat_message"
+    assert captured["payload"] == {
+        "p_fingerprint": "a" * 64,
+        "p_role": "assistant",
+        "p_content": "回复",
+        "p_assistant_id": "orange-uuid",
+        "p_conversation_id": "gw:new-app:123",
+    }
+
+
 def test_supabase_failures_do_not_block_chat():
     async def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"message": "temporary failure"})
