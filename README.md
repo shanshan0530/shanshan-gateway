@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加了一个默认关闭的私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 的短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供可选的 Gateway 全记忆模式；v0.7 为这些新前端增加分批自动总结。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供 Gateway 全记忆模式；v0.7 增加分批自动总结；v0.8 增加可控的 TG 主动心跳。
 
 ## 路线
 
@@ -131,9 +131,29 @@ https://你的网关域名/memory/v1
 
 部署前需应用 `supabase/migrations/202607230002_add_gateway_auto_summary.sql` 与后续修正迁移。生产项目已应用时不需要重复执行。
 
+## v0.8 Telegram 主动心跳
+
+- 每 15 分钟进行一次本地条件检查，不会每次检查都调用模型；
+- 读取 Supabase 中所有渠道最后一次 user 活动，正在橘瓣或新 App 聊天时不会误判为沉默；
+- 连续 60 分钟没有 user 活动后允许主动联系；
+- 普通冷却 90 分钟，Eventide 出现强烈状态或有效短时事件时缩短为 45 分钟；
+- 每天最多主动发送 10 条，默认 `06:00–09:00`（`Asia/Taipei`）为安静时段；
+- 生成主动消息时注入 TG 角色提示词、近期 Supabase 总结、跨端对话、TG 短期上下文和 Eventide；
+- 成功发送的主动消息会写入 TG SQLite 与 Supabase，后续回复可以自然接续；
+- 心跳开关、最后发送时间和每日计数保存在 TG SQLite，重部署后仍然有效；
+- 任一记忆或生成服务临时失败时不会发送占位消息，也不会消耗当日次数。
+
+TG 私聊命令：
+
+```text
+/heartbeat          查看状态与今日次数
+/heartbeat on       开启自动心跳
+/heartbeat off      暂停自动心跳
+/heartbeat now      忽略沉默、冷却和安静时段，立即生成一条测试消息
+```
+
 ### 后续路线
 
-- v0.8：基于 Eventide、沉默时长、安静时段、冷却和每日上限的 TG 主动心跳；
 - 自动总结之上的纠错和 OB 选择性长期写入；
 - 景行自拍语义图库，后续升级为 Gateway 调用生图 API 的动态自拍。
 
@@ -201,6 +221,15 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | 否 | 长轮询等待时间，默认 30 秒 |
 | `TELEGRAM_DB_PATH` | 否 | TG 短期会话数据库，默认 `/app/data/telegram.sqlite3` |
 | `TELEGRAM_MAX_STORED_MESSAGES` | 否 | 每个私聊最多保留的消息数，默认 500 |
+| `TELEGRAM_HEARTBEAT_ENABLED` | 否 | 是否启动 TG 主动心跳，默认 true；可再用 TG 命令暂停 |
+| `TELEGRAM_HEARTBEAT_CHECK_SECONDS` | 否 | 后台条件检查间隔，默认 900 秒 |
+| `TELEGRAM_HEARTBEAT_SILENCE_MINUTES` | 否 | 允许首次主动联系前的沉默时间，默认 60 分钟 |
+| `TELEGRAM_HEARTBEAT_COOLDOWN_MINUTES` | 否 | 普通状态下两次心跳最短间隔，默认 90 分钟 |
+| `TELEGRAM_HEARTBEAT_STRONG_COOLDOWN_MINUTES` | 否 | Eventide 强烈状态下最短间隔，默认 45 分钟 |
+| `TELEGRAM_HEARTBEAT_DAILY_LIMIT` | 否 | 每个本地日期最多主动发送条数，默认 10 |
+| `TELEGRAM_HEARTBEAT_QUIET_START_HOUR` | 否 | 安静时段开始小时，默认 6 |
+| `TELEGRAM_HEARTBEAT_QUIET_END_HOUR` | 否 | 安静时段结束小时，默认 9 |
+| `TELEGRAM_HEARTBEAT_TIMEZONE` | 否 | 心跳日期和安静时段时区，默认 `Asia/Taipei` |
 | `OMBRE_RECALL_ENABLED` | 否 | 是否启用 TG 回复前的原版 OB 只读召回，默认 false |
 | `OMBRE_MCP_URL` | 否 | 原版 OB 的 MCP 地址，可带或不带 `/mcp` |
 | `OMBRE_MCP_TOKEN` | 否 | 原版 OB 静态 Token，仅作为请求头发送 |

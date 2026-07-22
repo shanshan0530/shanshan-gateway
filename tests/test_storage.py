@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from app.storage import ConversationStore
 
 
@@ -28,3 +30,35 @@ def test_conversation_store_prunes_and_clears(tmp_path):
     ]
     store.clear("123")
     assert store.recent("123", 10) == []
+
+
+def test_heartbeat_state_persists_toggle_count_and_timestamp(tmp_path):
+    db_path = tmp_path / "telegram.sqlite3"
+    store = ConversationStore(str(db_path))
+    assert store.heartbeat_state("123", default_enabled=True).enabled
+
+    store.set_heartbeat_enabled("123", False)
+    sent_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    recorded = store.record_heartbeat_sent(
+        "123",
+        sent_at=sent_at,
+        local_date="2026-07-23",
+        default_enabled=True,
+    )
+    assert not recorded.enabled
+    assert recorded.daily_count == 1
+
+    reopened = ConversationStore(str(db_path))
+    state = reopened.heartbeat_state("123", default_enabled=True)
+    assert not state.enabled
+    assert state.daily_date == "2026-07-23"
+    assert state.daily_count == 1
+    assert state.last_sent_at is not None
+
+
+def test_last_message_at_returns_latest_role_timestamp(tmp_path):
+    store = ConversationStore(str(tmp_path / "telegram.sqlite3"))
+    assert store.last_message_at("123", "user") is None
+    store.append("123", "user", "你好")
+    assert store.last_message_at("123", "user") is not None
+    assert store.last_message_at("123", "assistant") is None

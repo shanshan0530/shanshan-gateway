@@ -18,6 +18,13 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _hour_env(name: str, default: int) -> int:
+    try:
+        return min(23, max(0, int(os.getenv(name, str(default)))))
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     gateway_api_key: str
@@ -34,6 +41,15 @@ class Settings:
     telegram_poll_timeout_seconds: int = 30
     telegram_db_path: str = "/app/data/telegram.sqlite3"
     telegram_max_stored_messages: int = 500
+    telegram_heartbeat_enabled: bool = True
+    telegram_heartbeat_check_seconds: int = 900
+    telegram_heartbeat_silence_minutes: int = 60
+    telegram_heartbeat_cooldown_minutes: int = 90
+    telegram_heartbeat_strong_cooldown_minutes: int = 45
+    telegram_heartbeat_daily_limit: int = 10
+    telegram_heartbeat_quiet_start_hour: int = 6
+    telegram_heartbeat_quiet_end_hour: int = 9
+    telegram_heartbeat_timezone: str = "Asia/Taipei"
     ombre_recall_enabled: bool = False
     ombre_mcp_url: str = ""
     ombre_mcp_token: str = ""
@@ -79,6 +95,34 @@ class Settings:
             telegram_max_stored_messages=_positive_int(
                 "TELEGRAM_MAX_STORED_MESSAGES", 500
             ),
+            telegram_heartbeat_enabled=_bool_env(
+                "TELEGRAM_HEARTBEAT_ENABLED", True
+            ),
+            telegram_heartbeat_check_seconds=_positive_int(
+                "TELEGRAM_HEARTBEAT_CHECK_SECONDS", 900
+            ),
+            telegram_heartbeat_silence_minutes=_positive_int(
+                "TELEGRAM_HEARTBEAT_SILENCE_MINUTES", 60
+            ),
+            telegram_heartbeat_cooldown_minutes=_positive_int(
+                "TELEGRAM_HEARTBEAT_COOLDOWN_MINUTES", 90
+            ),
+            telegram_heartbeat_strong_cooldown_minutes=_positive_int(
+                "TELEGRAM_HEARTBEAT_STRONG_COOLDOWN_MINUTES", 45
+            ),
+            telegram_heartbeat_daily_limit=_positive_int(
+                "TELEGRAM_HEARTBEAT_DAILY_LIMIT", 10
+            ),
+            telegram_heartbeat_quiet_start_hour=_hour_env(
+                "TELEGRAM_HEARTBEAT_QUIET_START_HOUR", 6
+            ),
+            telegram_heartbeat_quiet_end_hour=_hour_env(
+                "TELEGRAM_HEARTBEAT_QUIET_END_HOUR", 9
+            ),
+            telegram_heartbeat_timezone=os.getenv(
+                "TELEGRAM_HEARTBEAT_TIMEZONE", "Asia/Taipei"
+            ).strip()
+            or "Asia/Taipei",
             ombre_recall_enabled=_bool_env("OMBRE_RECALL_ENABLED", False),
             ombre_mcp_url=os.getenv("OMBRE_MCP_URL", "").strip(),
             ombre_mcp_token=os.getenv("OMBRE_MCP_TOKEN", "").strip(),
@@ -124,6 +168,18 @@ class Settings:
     @property
     def telegram_authorized(self) -> bool:
         return bool(self.telegram_allowed_user_id)
+
+    @property
+    def telegram_heartbeat_ready(self) -> bool:
+        return bool(
+            self.telegram_heartbeat_enabled
+            and self.telegram_enabled
+            and self.telegram_authorized
+            and self.telegram_system_prompt
+            and self.upstream_api_key
+            and self.upstream_base_url
+            and self.upstream_model
+        )
 
     @property
     def ombre_recall_ready(self) -> bool:

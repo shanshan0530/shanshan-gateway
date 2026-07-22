@@ -34,6 +34,12 @@ class SummaryBatch:
     messages: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class HeartbeatSignal:
+    strong: bool
+    has_active_event: bool
+
+
 class SupabaseBridge:
     """Small PostgREST adapter for cross-channel continuity and Eventide state."""
 
@@ -116,6 +122,60 @@ class SupabaseBridge:
         ][: self.settings.supabase_recent_message_limit]
         cross_channel.reverse()
         return render_continuity_context(summaries, cross_channel)
+
+    async def latest_user_activity(self) -> datetime | None:
+        if not self.settings.supabase_continuity_ready:
+            return None
+        try:
+            rows = await self._select(
+                "chat_messages",
+                {
+                    "assistant_id": f"eq.{self.settings.orangechat_assistant_id}",
+                    "role": "eq.user",
+                    "select": "created_at",
+                    "order": "created_at.desc",
+                    "limit": "1",
+                },
+            )
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
+        if not rows:
+            return None
+        return _parse_datetime(rows[0].get("created_at"))
+
+    async def heartbeat_signal(self) -> HeartbeatSignal:
+        if not self.settings.eventide_context_ready:
+            return HeartbeatSignal(False, False)
+        try:
+            rows = await self._select(
+                "eventide_body_state",
+                {
+                    "assistant_id": f"eq.{self.settings.eventide_assistant_id}",
+                    "select": (
+                        "heat,pressure,sensitivity,reserve,possessiveness,"
+                        "active_event_key,active_event_expires_at"
+                    ),
+                    "limit": "1",
+                },
+            )
+        except (httpx.HTTPError, ValueError, TypeError):
+            return HeartbeatSignal(False, False)
+        if not rows:
+            return HeartbeatSignal(False, False)
+        state = rows[0]
+        event_expires = _parse_datetime(state.get("active_event_expires_at"))
+        has_event = bool(state.get("active_event_key")) and (
+            event_expires is None or event_expires > datetime.now(timezone.utc)
+        )
+        values = [
+            value
+            for key in ("heat", "pressure", "sensitivity", "reserve", "possessiveness")
+            if (value := _safe_number(state.get(key))) is not None
+        ]
+        return HeartbeatSignal(
+            strong=has_event or (bool(values) and max(values) >= 70),
+            has_active_event=has_event,
+        )
 
     async def store_message(
         self,
@@ -365,6 +425,18 @@ def render_continuity_context(
 def _level(value: float) -> str:
     index = min(4, max(0, int(value // 20)))
     return _LEVELS[index]
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _safe_number(value: Any) -> float | None:

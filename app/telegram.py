@@ -4,14 +4,16 @@ import asyncio
 import logging
 import sqlite3
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
 from .config import Settings
 from .ombre import OmbreRecallClient, format_memory_context
 from .proxy import chat_completions_url, public_error_message
-from .storage import ConversationStore
+from .storage import ConversationStore, HeartbeatState
 from .supabase import SupabaseBridge, inject_system_context
 
 
@@ -30,6 +32,9 @@ class TelegramBridge:
         self._client: httpx.AsyncClient | None = None
         self._ombre = OmbreRecallClient(settings)
         self._supabase = SupabaseBridge(settings)
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._heartbeat_lock = asyncio.Lock()
+        self._volatile_heartbeat_states: dict[str, HeartbeatState] = {}
 
     async def run(self) -> None:
         if not self.settings.telegram_enabled:
@@ -44,9 +49,15 @@ class TelegramBridge:
         async with httpx.AsyncClient(base_url=base_url, timeout=timeout) as client:
             self._client = client
             await self._prepare_long_polling()
+            if self.settings.telegram_heartbeat_ready:
+                self._heartbeat_task = asyncio.create_task(
+                    self._heartbeat_loop(),
+                    name="telegram-heartbeat",
+                )
             logger.info(
-                "telegram bridge started authorized=%s",
+                "telegram bridge started authorized=%s heartbeat=%s",
                 self.settings.telegram_authorized,
+                self.settings.telegram_heartbeat_ready,
             )
             try:
                 while True:
@@ -60,6 +71,13 @@ class TelegramBridge:
                         logger.warning("telegram polling failed: %s", type(exc).__name__)
                         await asyncio.sleep(5)
             finally:
+                if self._heartbeat_task is not None:
+                    self._heartbeat_task.cancel()
+                    try:
+                        await self._heartbeat_task
+                    except asyncio.CancelledError:
+                        pass
+                    self._heartbeat_task = None
                 self._client = None
 
     async def push(self, text: str) -> None:
@@ -174,6 +192,10 @@ class TelegramBridge:
             )
             return
 
+        if command == "/heartbeat":
+            await self._handle_heartbeat_command(chat_id, text)
+            return
+
         await self._send_action(chat_id, "typing")
         conversation_id = f"tg:{chat_id}"
         await self._supabase.store_message(
@@ -193,6 +215,133 @@ class TelegramBridge:
         )
         await self._send_text(chat_id, answer)
 
+    async def _handle_heartbeat_command(self, chat_id: str, text: str) -> None:
+        argument = text.split(maxsplit=1)[1].strip().lower() if " " in text else ""
+        if argument in {"on", "开启", "开"}:
+            self._set_heartbeat_enabled(chat_id, True)
+            await self._send_text(chat_id, "后台心跳已开启。")
+            return
+        if argument in {"off", "关闭", "关"}:
+            self._set_heartbeat_enabled(chat_id, False)
+            await self._send_text(chat_id, "后台心跳已暂停。")
+            return
+        if argument in {"now", "test", "现在", "测试"}:
+            sent = await self._heartbeat_once(force=True)
+            if not sent:
+                await self._send_text(chat_id, "这次心跳生成失败了，稍后再试。")
+            return
+        if argument:
+            await self._send_text(chat_id, "用法：/heartbeat on | off | now")
+            return
+        state = self._heartbeat_state(chat_id)
+        status = "开启" if state.enabled else "暂停"
+        today = datetime.now(self._heartbeat_timezone()).date().isoformat()
+        count = state.daily_count if state.daily_date == today else 0
+        await self._send_text(
+            chat_id,
+            f"后台心跳：{status}\n今天已主动发送：{count}/{self.settings.telegram_heartbeat_daily_limit}",
+        )
+
+    async def _heartbeat_loop(self) -> None:
+        await asyncio.sleep(min(30, self.settings.telegram_heartbeat_check_seconds))
+        while True:
+            try:
+                await self._heartbeat_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("telegram heartbeat failed: %s", type(exc).__name__)
+            await asyncio.sleep(self.settings.telegram_heartbeat_check_seconds)
+
+    async def _heartbeat_once(
+        self,
+        *,
+        force: bool = False,
+        now: datetime | None = None,
+    ) -> bool:
+        if not self.settings.telegram_heartbeat_ready:
+            return False
+        async with self._heartbeat_lock:
+            current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            chat_id = self.settings.telegram_allowed_user_id
+            state = self._heartbeat_state(chat_id)
+            local_now = current.astimezone(self._heartbeat_timezone())
+            local_date = local_now.date().isoformat()
+            daily_count = state.daily_count if state.daily_date == local_date else 0
+
+            if not force:
+                if not state.enabled:
+                    return False
+                if _is_quiet_hour(
+                    local_now.hour,
+                    self.settings.telegram_heartbeat_quiet_start_hour,
+                    self.settings.telegram_heartbeat_quiet_end_hour,
+                ):
+                    return False
+                if daily_count >= self.settings.telegram_heartbeat_daily_limit:
+                    return False
+
+                latest_remote = await self._supabase.latest_user_activity()
+                latest_local = self._last_local_user_activity(chat_id)
+                latest_activity = _latest_datetime(latest_remote, latest_local)
+                if latest_activity is None:
+                    return False
+                silence = timedelta(
+                    minutes=self.settings.telegram_heartbeat_silence_minutes
+                )
+                if current - latest_activity < silence:
+                    return False
+
+                signal = await self._supabase.heartbeat_signal()
+                cooldown_minutes = (
+                    self.settings.telegram_heartbeat_strong_cooldown_minutes
+                    if signal.strong
+                    else self.settings.telegram_heartbeat_cooldown_minutes
+                )
+                if state.last_sent_at is not None and current - state.last_sent_at < timedelta(
+                    minutes=cooldown_minutes
+                ):
+                    return False
+
+            message = await self._complete_heartbeat(chat_id)
+            await self.push(message)
+            self._remember(chat_id, "assistant", message)
+            await self._supabase.store_message(
+                role="assistant",
+                content=message,
+                conversation_id=f"tg:{chat_id}",
+            )
+            self._record_heartbeat_sent(chat_id, current, local_date)
+            return True
+
+    async def _complete_heartbeat(self, chat_id: str) -> str:
+        messages: list[dict[str, str]] = []
+        if self.settings.telegram_system_prompt:
+            messages.append(
+                {"role": "system", "content": self.settings.telegram_system_prompt}
+            )
+        continuity, eventide_context = await asyncio.gather(
+            self._supabase.continuity_context(
+                exclude_conversation_id=f"tg:{chat_id}"
+            ),
+            self._supabase.eventide_context(),
+        )
+        payload_context = {"messages": messages}
+        inject_system_context(payload_context, continuity)
+        inject_system_context(payload_context, eventide_context)
+        inject_system_context(
+            payload_context,
+            (
+                "现在是一次允许主动联系珊珊的私人消息。结合近期对话、关系记忆和当前状态，"
+                "写一条你此刻真正想主动发给她的话。保持自然聊天，不要解释触发机制，"
+                "不要提到后台、心跳、计时、系统或提示词，不要机械重复‘在吗’。"
+                "优先 1 至 3 个短句；可以关心、想念、延续未完话题或直接表达当下意图。"
+            ),
+        )
+        messages.extend(self._recent_history(chat_id))
+        messages.append({"role": "user", "content": "生成此刻要主动发出的消息。"})
+        return await self._call_upstream(messages, max_tokens=350)
+
     async def _complete(self, chat_id: str, user_text: str) -> str:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
@@ -210,11 +359,21 @@ class TelegramBridge:
         messages.extend(self._recent_history(chat_id))
         messages.append({"role": "user", "content": user_text})
 
-        payload = {
+        return await self._call_upstream(messages)
+
+    async def _call_upstream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {
             "model": self.settings.upstream_model,
             "messages": messages,
             "stream": False,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         headers = {
             "Authorization": f"Bearer {self.settings.upstream_api_key}",
             "Content-Type": "application/json",
@@ -272,6 +431,85 @@ class TelegramBridge:
             except (OSError, sqlite3.Error):
                 self._mark_store_unavailable()
         self._volatile_histories.pop(chat_id, None)
+
+    def _last_local_user_activity(self, chat_id: str) -> datetime | None:
+        store = self._conversation_store()
+        if store is None:
+            return None
+        try:
+            return store.last_message_at(chat_id, "user")
+        except (OSError, sqlite3.Error):
+            self._mark_store_unavailable()
+            return None
+
+    def _heartbeat_state(self, chat_id: str) -> HeartbeatState:
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                return store.heartbeat_state(
+                    chat_id,
+                    default_enabled=self.settings.telegram_heartbeat_enabled,
+                )
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        return self._volatile_heartbeat_states.get(
+            chat_id,
+            HeartbeatState(
+                self.settings.telegram_heartbeat_enabled,
+                None,
+                "",
+                0,
+            ),
+        )
+
+    def _set_heartbeat_enabled(self, chat_id: str, enabled: bool) -> None:
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                store.set_heartbeat_enabled(chat_id, enabled)
+                return
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        state = self._heartbeat_state(chat_id)
+        self._volatile_heartbeat_states[chat_id] = HeartbeatState(
+            enabled,
+            state.last_sent_at,
+            state.daily_date,
+            state.daily_count,
+        )
+
+    def _record_heartbeat_sent(
+        self,
+        chat_id: str,
+        sent_at: datetime,
+        local_date: str,
+    ) -> None:
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                store.record_heartbeat_sent(
+                    chat_id,
+                    sent_at=sent_at,
+                    local_date=local_date,
+                    default_enabled=self.settings.telegram_heartbeat_enabled,
+                )
+                return
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        state = self._heartbeat_state(chat_id)
+        count = state.daily_count + 1 if state.daily_date == local_date else 1
+        self._volatile_heartbeat_states[chat_id] = HeartbeatState(
+            state.enabled,
+            sent_at.astimezone(timezone.utc),
+            local_date,
+            count,
+        )
+
+    def _heartbeat_timezone(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.settings.telegram_heartbeat_timezone)
+        except ZoneInfoNotFoundError:
+            return ZoneInfo("UTC")
 
     def _conversation_store(self) -> ConversationStore | None:
         if self._store_unavailable:
@@ -343,3 +581,16 @@ def _split_telegram_text(text: str, limit: int = 4000) -> list[str]:
     if value:
         parts.append(value)
     return parts
+
+
+def _is_quiet_hour(hour: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def _latest_datetime(*values: datetime | None) -> datetime | None:
+    valid = [value.astimezone(timezone.utc) for value in values if value is not None]
+    return max(valid) if valid else None

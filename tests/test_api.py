@@ -28,11 +28,22 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.7.0",
+        "version": "0.8.0",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",
-        "telegram": {"enabled": False, "authorized": False},
+        "telegram": {
+            "enabled": False,
+            "authorized": False,
+            "heartbeat": {
+                "ready": False,
+                "silence_minutes": 60,
+                "cooldown_minutes": 90,
+                "strong_cooldown_minutes": 45,
+                "daily_limit": 10,
+                "quiet_hours": "06:00-09:00",
+            },
+        },
         "ombre_recall": {"enabled": False, "ready": False},
         "supabase": {
             "ready": False,

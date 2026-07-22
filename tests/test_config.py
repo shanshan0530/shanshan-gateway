@@ -76,3 +76,25 @@ def test_gateway_auto_summary_needs_supabase_and_upstream(monkeypatch):
 
     monkeypatch.setenv("GATEWAY_AUTO_SUMMARY_ENABLED", "false")
     assert not Settings.from_env().gateway_auto_summary_ready
+
+
+def test_telegram_heartbeat_uses_sticky_defaults_and_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot-token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "123")
+    monkeypatch.setenv("TELEGRAM_SYSTEM_PROMPT", "你是景行。")
+    monkeypatch.setenv("UPSTREAM_API_KEY", "upstream-key")
+    monkeypatch.setenv("UPSTREAM_BASE_URL", "https://relay.example/v1")
+    monkeypatch.setenv("UPSTREAM_MODEL", "claude-model")
+    monkeypatch.delenv("TELEGRAM_HEARTBEAT_ENABLED", raising=False)
+
+    settings = Settings.from_env()
+    assert settings.telegram_heartbeat_ready
+    assert settings.telegram_heartbeat_silence_minutes == 60
+    assert settings.telegram_heartbeat_cooldown_minutes == 90
+    assert settings.telegram_heartbeat_strong_cooldown_minutes == 45
+    assert settings.telegram_heartbeat_daily_limit == 10
+    assert settings.telegram_heartbeat_quiet_start_hour == 6
+    assert settings.telegram_heartbeat_quiet_end_hour == 9
+
+    monkeypatch.setenv("TELEGRAM_HEARTBEAT_ENABLED", "false")
+    assert not Settings.from_env().telegram_heartbeat_ready

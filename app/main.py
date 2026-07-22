@@ -27,7 +27,7 @@ from .telegram import TelegramBridge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
@@ -112,6 +112,17 @@ async def health() -> JSONResponse:
             "telegram": {
                 "enabled": settings.telegram_enabled,
                 "authorized": settings.telegram_authorized,
+                "heartbeat": {
+                    "ready": settings.telegram_heartbeat_ready,
+                    "silence_minutes": settings.telegram_heartbeat_silence_minutes,
+                    "cooldown_minutes": settings.telegram_heartbeat_cooldown_minutes,
+                    "strong_cooldown_minutes": settings.telegram_heartbeat_strong_cooldown_minutes,
+                    "daily_limit": settings.telegram_heartbeat_daily_limit,
+                    "quiet_hours": (
+                        f"{settings.telegram_heartbeat_quiet_start_hour:02d}:00-"
+                        f"{settings.telegram_heartbeat_quiet_end_hour:02d}:00"
+                    ),
+                },
             },
             "ombre_recall": {
                 "enabled": settings.ombre_recall_enabled,

@@ -290,3 +290,38 @@ def test_store_memory_summary_uses_atomic_rpc():
         "p_new_last_message_id": 34,
         "p_content": "一段新总结",
     }
+
+
+def test_latest_user_activity_and_strong_heartbeat_signal():
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat_messages"):
+            return httpx.Response(
+                200,
+                json=[{"created_at": "2026-07-23T01:02:03Z"}],
+            )
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "heat": 75,
+                    "pressure": 20,
+                    "sensitivity": 30,
+                    "reserve": 40,
+                    "possessiveness": 65,
+                    "active_event_key": "restless",
+                    "active_event_expires_at": future,
+                }
+            ],
+        )
+
+    bridge = SupabaseBridge(
+        supabase_settings(),
+        transport=httpx.MockTransport(handler),
+    )
+    latest = asyncio.run(bridge.latest_user_activity())
+    signal = asyncio.run(bridge.heartbeat_signal())
+    assert latest == datetime(2026, 7, 23, 1, 2, 3, tzinfo=timezone.utc)
+    assert signal.strong
+    assert signal.has_active_event
