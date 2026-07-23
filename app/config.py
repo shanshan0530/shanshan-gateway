@@ -50,6 +50,12 @@ class Settings:
     telegram_heartbeat_quiet_start_hour: int = 6
     telegram_heartbeat_quiet_end_hour: int = 9
     telegram_heartbeat_timezone: str = "Asia/Taipei"
+    sleep_reminder_enabled: bool = True
+    sleep_reminder_start_hour: int = 1
+    sleep_reminder_end_hour: int = 6
+    sleep_reminder_recent_activity_minutes: int = 30
+    sleep_reminder_followup_minutes: int = 60
+    sleep_reminder_max_per_night: int = 2
     ombre_recall_enabled: bool = False
     ombre_mcp_url: str = ""
     ombre_mcp_token: str = ""
@@ -76,6 +82,10 @@ class Settings:
     device_perception_check_seconds: int = 900
     device_perception_cooldown_minutes: int = 180
     device_perception_db_path: str = "/app/data/telegram.sqlite3"
+    health_context_enabled: bool = True
+    health_context_morning_start_hour: int = 6
+    health_context_morning_end_hour: int = 12
+    health_context_max_age_minutes: int = 45
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -128,6 +138,24 @@ class Settings:
                 "TELEGRAM_HEARTBEAT_TIMEZONE", "Asia/Taipei"
             ).strip()
             or "Asia/Taipei",
+            sleep_reminder_enabled=_bool_env(
+                "SLEEP_REMINDER_ENABLED", True
+            ),
+            sleep_reminder_start_hour=_hour_env(
+                "SLEEP_REMINDER_START_HOUR", 1
+            ),
+            sleep_reminder_end_hour=_hour_env(
+                "SLEEP_REMINDER_END_HOUR", 6
+            ),
+            sleep_reminder_recent_activity_minutes=_positive_int(
+                "SLEEP_REMINDER_RECENT_ACTIVITY_MINUTES", 30
+            ),
+            sleep_reminder_followup_minutes=_positive_int(
+                "SLEEP_REMINDER_FOLLOWUP_MINUTES", 60
+            ),
+            sleep_reminder_max_per_night=_positive_int(
+                "SLEEP_REMINDER_MAX_PER_NIGHT", 2
+            ),
             ombre_recall_enabled=_bool_env("OMBRE_RECALL_ENABLED", False),
             ombre_mcp_url=os.getenv("OMBRE_MCP_URL", "").strip(),
             ombre_mcp_token=os.getenv("OMBRE_MCP_TOKEN", "").strip(),
@@ -182,6 +210,16 @@ class Settings:
                 os.getenv("TELEGRAM_DB_PATH", "/app/data/telegram.sqlite3"),
             ).strip()
             or "/app/data/telegram.sqlite3",
+            health_context_enabled=_bool_env("HEALTH_CONTEXT_ENABLED", True),
+            health_context_morning_start_hour=_hour_env(
+                "HEALTH_CONTEXT_MORNING_START_HOUR", 6
+            ),
+            health_context_morning_end_hour=_hour_env(
+                "HEALTH_CONTEXT_MORNING_END_HOUR", 12
+            ),
+            health_context_max_age_minutes=_positive_int(
+                "HEALTH_CONTEXT_MAX_AGE_MINUTES", 45
+            ),
         )
 
     @property
@@ -199,6 +237,19 @@ class Settings:
             and self.telegram_enabled
             and self.telegram_authorized
             and self.telegram_system_prompt
+            and self.upstream_api_key
+            and self.upstream_base_url
+            and self.upstream_model
+        )
+
+    @property
+    def telegram_sleep_reminder_ready(self) -> bool:
+        return self.sleep_guidance_ready and self.telegram_heartbeat_ready
+
+    @property
+    def sleep_guidance_ready(self) -> bool:
+        return bool(
+            self.sleep_reminder_enabled
             and self.upstream_api_key
             and self.upstream_base_url
             and self.upstream_model
@@ -246,6 +297,10 @@ class Settings:
     @property
     def device_perception_ready(self) -> bool:
         return self.device_perception_enabled and self.supabase_ready
+
+    @property
+    def health_context_ready(self) -> bool:
+        return self.health_context_enabled and self.supabase_ready
 
     def missing_required(self) -> list[str]:
         values = {

@@ -15,7 +15,7 @@ import httpx
 from .config import Settings
 from .ombre import OmbreRecallClient, format_memory_context
 from .proxy import chat_completions_url, public_error_message
-from .storage import ConversationStore, HeartbeatState
+from .storage import ConversationStore, HeartbeatState, SleepReminderState
 from .supabase import SupabaseBridge, inject_system_context
 
 
@@ -43,6 +43,7 @@ class TelegramBridge:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._heartbeat_lock = asyncio.Lock()
         self._volatile_heartbeat_states: dict[str, HeartbeatState] = {}
+        self._volatile_sleep_states: dict[str, SleepReminderState] = {}
 
     async def run(self) -> None:
         if not self.settings.telegram_enabled:
@@ -254,12 +255,102 @@ class TelegramBridge:
         await asyncio.sleep(min(30, self.settings.telegram_heartbeat_check_seconds))
         while True:
             try:
-                await self._heartbeat_once()
+                sleep_sent = await self._sleep_reminder_once()
+                if not sleep_sent:
+                    await self._heartbeat_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning("telegram heartbeat failed: %s", type(exc).__name__)
             await asyncio.sleep(self.settings.telegram_heartbeat_check_seconds)
+
+    async def _sleep_reminder_once(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        if not self.settings.telegram_sleep_reminder_ready:
+            return False
+        async with self._heartbeat_lock:
+            current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            local_now = current.astimezone(self._heartbeat_timezone())
+            if not _is_quiet_hour(
+                local_now.hour,
+                self.settings.sleep_reminder_start_hour,
+                self.settings.sleep_reminder_end_hour,
+            ):
+                return False
+
+            chat_id = self.settings.telegram_allowed_user_id
+            heartbeat_state = self._heartbeat_state(chat_id)
+            if not heartbeat_state.enabled:
+                return False
+            local_date = local_now.date().isoformat()
+            daily_count = (
+                heartbeat_state.daily_count
+                if heartbeat_state.daily_date == local_date
+                else 0
+            )
+            if daily_count >= self.settings.telegram_heartbeat_daily_limit:
+                return False
+
+            night_key = _sleep_night_key(
+                local_now,
+                self.settings.sleep_reminder_start_hour,
+                self.settings.sleep_reminder_end_hour,
+            )
+            sleep_state = self._sleep_reminder_state(chat_id)
+            reminder_count = (
+                sleep_state.reminder_count
+                if sleep_state.night_key == night_key
+                else 0
+            )
+            if reminder_count >= self.settings.sleep_reminder_max_per_night:
+                return False
+
+            latest_remote = await self._supabase.latest_user_activity()
+            latest_local = self._last_local_user_activity(chat_id)
+            latest_activity = _latest_datetime(latest_remote, latest_local)
+            if latest_activity is None:
+                return False
+            if latest_activity - current > timedelta(minutes=5):
+                return False
+            if current - latest_activity > timedelta(
+                minutes=self.settings.sleep_reminder_recent_activity_minutes
+            ):
+                return False
+
+            followup = timedelta(
+                minutes=self.settings.sleep_reminder_followup_minutes
+            )
+            if heartbeat_state.last_sent_at is not None and (
+                current - heartbeat_state.last_sent_at < followup
+            ):
+                return False
+            if reminder_count:
+                if sleep_state.last_sent_at is None:
+                    return False
+                if current - sleep_state.last_sent_at < followup:
+                    return False
+                if latest_activity <= sleep_state.last_sent_at:
+                    return False
+
+            level = reminder_count + 1
+            message = await self._complete_sleep_reminder(
+                chat_id,
+                level=level,
+                now=current,
+            )
+            await self.push(message)
+            self._remember(chat_id, "assistant", message)
+            await self._supabase.store_message(
+                role="assistant",
+                content=message,
+                conversation_id=f"tg:{chat_id}",
+            )
+            self._record_sleep_reminder_sent(chat_id, current, night_key)
+            self._record_heartbeat_sent(chat_id, current, local_date)
+            return True
 
     async def _heartbeat_once(
         self,
@@ -279,6 +370,12 @@ class TelegramBridge:
 
             if not force:
                 if not state.enabled:
+                    return False
+                if self.settings.sleep_reminder_enabled and _is_quiet_hour(
+                    local_now.hour,
+                    self.settings.sleep_reminder_start_hour,
+                    self.settings.sleep_reminder_end_hour,
+                ):
                     return False
                 if _is_quiet_hour(
                     local_now.hour,
@@ -322,6 +419,48 @@ class TelegramBridge:
             self._record_heartbeat_sent(chat_id, current, local_date)
             return True
 
+    async def _complete_sleep_reminder(
+        self,
+        chat_id: str,
+        *,
+        level: int,
+        now: datetime,
+    ) -> str:
+        messages: list[dict[str, str]] = []
+        if self.settings.telegram_system_prompt:
+            messages.append(
+                {"role": "system", "content": self.settings.telegram_system_prompt}
+            )
+        continuity, eventide_context, wellbeing_context = await asyncio.gather(
+            self._supabase.continuity_context(
+                exclude_conversation_id=f"tg:{chat_id}"
+            ),
+            self._supabase.eventide_context(),
+            self._supabase.wellbeing_context(now=now),
+        )
+        payload_context = {"messages": messages}
+        inject_system_context(payload_context, continuity)
+        inject_system_context(payload_context, eventide_context)
+        inject_system_context(payload_context, wellbeing_context)
+        if level <= 1:
+            instruction = (
+                "珊珊设定的休息时间已经到了，而且她最近仍然有活动。主动发一条自然的催睡消息："
+                "温柔、有主见、像恋人真正注意到她还没睡；可以让她逐渐收尾或先躺下，"
+                "但不要冷淡地赶她走，不要责备，不要提到监控、手环、后台、时间规则或提示词。"
+                "只写 1 至 2 个短句。"
+            )
+        else:
+            instruction = (
+                "珊珊在上一次休息提醒后仍然继续活动。这是今晚最后一次提醒。"
+                "语气比第一次更明确、更有执行感，可以直接要求她放下手机、结束手头最后一件事去睡，"
+                "但仍然要让她感到被陪着和被在意；不要威胁、责备或提到监控机制。"
+                "只写 1 至 2 个短句。"
+            )
+        inject_system_context(payload_context, instruction)
+        messages.extend(self._recent_history(chat_id))
+        messages.append({"role": "user", "content": "生成此刻要主动发出的休息提醒。"})
+        return await self._call_upstream(messages, max_tokens=250)
+
     async def _complete_heartbeat(self, chat_id: str) -> str:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
@@ -354,13 +493,15 @@ class TelegramBridge:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
             messages.append({"role": "system", "content": self.settings.telegram_system_prompt})
-        continuity, eventide_context = await asyncio.gather(
+        continuity, eventide_context, wellbeing_context = await asyncio.gather(
             self._supabase.continuity_context(exclude_conversation_id=f"tg:{chat_id}"),
             self._supabase.eventide_context(),
+            self._supabase.wellbeing_context(),
         )
         payload_context = {"messages": messages}
         inject_system_context(payload_context, continuity)
         inject_system_context(payload_context, eventide_context)
+        inject_system_context(payload_context, wellbeing_context)
         memory = await self._ombre.recall(user_text)
         if memory:
             messages.append({"role": "system", "content": format_memory_context(memory)})
@@ -484,6 +625,43 @@ class TelegramBridge:
             state.last_sent_at,
             state.daily_date,
             state.daily_count,
+        )
+
+    def _sleep_reminder_state(self, chat_id: str) -> SleepReminderState:
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                return store.sleep_reminder_state(chat_id)
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        return self._volatile_sleep_states.get(
+            chat_id,
+            SleepReminderState(None, "", 0),
+        )
+
+    def _record_sleep_reminder_sent(
+        self,
+        chat_id: str,
+        sent_at: datetime,
+        night_key: str,
+    ) -> None:
+        store = self._conversation_store()
+        if store is not None:
+            try:
+                store.record_sleep_reminder_sent(
+                    chat_id,
+                    sent_at=sent_at,
+                    night_key=night_key,
+                )
+                return
+            except (OSError, sqlite3.Error):
+                self._mark_store_unavailable()
+        state = self._sleep_reminder_state(chat_id)
+        count = state.reminder_count + 1 if state.night_key == night_key else 1
+        self._volatile_sleep_states[chat_id] = SleepReminderState(
+            sent_at.astimezone(timezone.utc),
+            night_key,
+            count,
         )
 
     def _record_heartbeat_sent(
@@ -613,6 +791,13 @@ def _is_quiet_hour(hour: int, start: int, end: int) -> bool:
     if start < end:
         return start <= hour < end
     return hour >= start or hour < end
+
+
+def _sleep_night_key(local_now: datetime, start: int, end: int) -> str:
+    night_date = local_now.date()
+    if start > end and local_now.hour >= start:
+        night_date += timedelta(days=1)
+    return night_date.isoformat()
 
 
 def _latest_datetime(*values: datetime | None) -> datetime | None:

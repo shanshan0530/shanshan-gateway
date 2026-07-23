@@ -154,6 +154,90 @@ def test_heartbeat_sends_after_silence_and_persists_count(tmp_path):
     }
 
 
+def test_sleep_reminder_sends_at_most_twice_and_requires_continued_activity(tmp_path):
+    bridge = TelegramBridge(heartbeat_settings(tmp_path))
+    first_now = datetime(2026, 7, 22, 17, 15, tzinfo=timezone.utc)  # 01:15 Taipei
+    latest_activity = first_now - timedelta(minutes=5)
+    sent = []
+    levels = []
+
+    async def latest_user_activity():
+        return latest_activity
+
+    async def complete_sleep(chat_id, *, level, now):
+        assert chat_id == "123"
+        levels.append(level)
+        return f"催睡提醒 {level}"
+
+    async def push(text):
+        sent.append(text)
+
+    async def store_message(**kwargs):
+        return True
+
+    bridge._supabase.latest_user_activity = latest_user_activity
+    bridge._supabase.store_message = store_message
+    bridge._complete_sleep_reminder = complete_sleep
+    bridge.push = push
+
+    assert asyncio.run(bridge._sleep_reminder_once(now=first_now)) is True
+    assert bridge._sleep_reminder_state("123").reminder_count == 1
+
+    second_now = first_now + timedelta(minutes=65)
+    latest_activity = second_now - timedelta(minutes=5)
+    assert asyncio.run(bridge._sleep_reminder_once(now=second_now)) is True
+    assert bridge._sleep_reminder_state("123").reminder_count == 2
+
+    third_now = second_now + timedelta(minutes=65)
+    latest_activity = third_now - timedelta(minutes=5)
+    assert asyncio.run(bridge._sleep_reminder_once(now=third_now)) is False
+    assert sent == ["催睡提醒 1", "催睡提醒 2"]
+    assert levels == [1, 2]
+    assert bridge._heartbeat_state("123").daily_count == 2
+
+
+def test_sleep_followup_requires_activity_after_first_reminder(tmp_path):
+    bridge = TelegramBridge(heartbeat_settings(tmp_path))
+    first_now = datetime(2026, 7, 22, 17, 15, tzinfo=timezone.utc)
+    latest_activity = first_now - timedelta(minutes=5)
+
+    async def latest_user_activity():
+        return latest_activity
+
+    async def complete_sleep(chat_id, *, level, now):
+        return "去睡。"
+
+    async def push(text):
+        return None
+
+    async def store_message(**kwargs):
+        return True
+
+    bridge._supabase.latest_user_activity = latest_user_activity
+    bridge._supabase.store_message = store_message
+    bridge._complete_sleep_reminder = complete_sleep
+    bridge.push = push
+
+    assert asyncio.run(bridge._sleep_reminder_once(now=first_now)) is True
+    assert (
+        asyncio.run(
+            bridge._sleep_reminder_once(now=first_now + timedelta(minutes=65))
+        )
+        is False
+    )
+
+
+def test_regular_heartbeat_does_not_wake_user_inside_sleep_window(tmp_path):
+    bridge = TelegramBridge(heartbeat_settings(tmp_path))
+    now = datetime(2026, 7, 22, 18, 0, tzinfo=timezone.utc)  # 02:00 Taipei
+
+    async def must_not_complete(chat_id):
+        raise AssertionError("regular heartbeat must pause during sleep window")
+
+    bridge._complete_heartbeat = must_not_complete
+    assert asyncio.run(bridge._heartbeat_once(now=now)) is False
+
+
 def test_heartbeat_respects_recent_activity_and_quiet_hours(tmp_path):
     now = datetime(2026, 7, 22, 22, 30, tzinfo=timezone.utc)  # 06:30 Taipei
     bridge = TelegramBridge(heartbeat_settings(tmp_path))

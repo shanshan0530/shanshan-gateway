@@ -56,6 +56,38 @@ def test_heartbeat_state_persists_toggle_count_and_timestamp(tmp_path):
     assert state.last_sent_at is not None
 
 
+def test_sleep_reminder_state_resets_by_night_and_survives_restart(tmp_path):
+    db_path = tmp_path / "telegram.sqlite3"
+    store = ConversationStore(str(db_path))
+    first_at = datetime(2026, 7, 22, 17, 15, tzinfo=timezone.utc)
+
+    first = store.record_sleep_reminder_sent(
+        "123",
+        sent_at=first_at,
+        night_key="2026-07-23",
+    )
+    second = store.record_sleep_reminder_sent(
+        "123",
+        sent_at=first_at + timedelta(hours=1),
+        night_key="2026-07-23",
+    )
+    assert first.reminder_count == 1
+    assert second.reminder_count == 2
+
+    reopened = ConversationStore(str(db_path))
+    persisted = reopened.sleep_reminder_state("123")
+    assert persisted.night_key == "2026-07-23"
+    assert persisted.reminder_count == 2
+    assert persisted.last_sent_at == first_at + timedelta(hours=1)
+
+    next_night = reopened.record_sleep_reminder_sent(
+        "123",
+        sent_at=first_at + timedelta(days=1),
+        night_key="2026-07-24",
+    )
+    assert next_night.reminder_count == 1
+
+
 def test_last_message_at_returns_latest_role_timestamp(tmp_path):
     store = ConversationStore(str(tmp_path / "telegram.sqlite3"))
     assert store.last_message_at("123", "user") is None

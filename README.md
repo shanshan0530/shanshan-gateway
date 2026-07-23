@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供 Gateway 全记忆模式；v0.7 增加分批自动总结；v0.8 增加可控的 TG 主动心跳；v0.9 建立只读设备感知与隐私安全事件层。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供 Gateway 全记忆模式；v0.7 增加分批自动总结；v0.8 增加可控的 TG 主动心跳；v0.9 建立只读设备感知与隐私安全事件层；v0.10 增加跨端早间健康背景与防刷屏催睡。
 
 ## 路线
 
@@ -182,6 +182,37 @@ GET /api/perception/status
 ```
 
 它只返回检查点、扫描次数和事件类型计数，不返回事件指纹或任何原始设备值。
+
+## v0.10 早间健康背景与催睡
+
+- 台湾时间 `06:00–12:00` 聊天时，只读取 `device_data` 最新一行健康快照；
+- 默认超过 45 分钟未更新的数据不注入，避免旧数据被误当成当前状态；
+- 兼容橘瓣把 `health_data` 以 JSON 字符串套在 JSONB 中的存储格式；
+- 睡眠、心率、血氧、压力、步数等只作为当前模型调用的临时背景，不写进 TG SQLite；
+- 提示模型不要逐项播报数字，也不要把每次回复变成健康报告；
+- `01:00–06:00` 聊天时提供自然的休息引导，不依赖前端时间提醒提示词；
+- 催睡窗口内暂停普通 TG 心跳，避免用户已经睡着后被随机主动消息叫醒；
+- TG 只有在最近 30 分钟仍有跨端 user 活动时才主动催睡；
+- 第一条后至少间隔 60 分钟，且必须检测到新的 user 活动才允许第二条；
+- 每晚最多两条催睡提醒，计数和时间保存在现有 SQLite，重部署不会重置；
+- 催睡消息沿用 TG 角色提示、跨端连续记忆、Eventide 和最新可用健康背景；
+- 健康数据不可用或暂时过期时，聊天和催睡都会安全降级。
+
+默认配置：
+
+```text
+SLEEP_REMINDER_ENABLED=true
+SLEEP_REMINDER_START_HOUR=1
+SLEEP_REMINDER_END_HOUR=6
+SLEEP_REMINDER_RECENT_ACTIVITY_MINUTES=30
+SLEEP_REMINDER_FOLLOWUP_MINUTES=60
+SLEEP_REMINDER_MAX_PER_NIGHT=2
+
+HEALTH_CONTEXT_ENABLED=true
+HEALTH_CONTEXT_MORNING_START_HOUR=6
+HEALTH_CONTEXT_MORNING_END_HOUR=12
+HEALTH_CONTEXT_MAX_AGE_MINUTES=45
+```
 
 ### 后续路线
 

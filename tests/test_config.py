@@ -100,6 +100,34 @@ def test_telegram_heartbeat_uses_sticky_defaults_and_can_be_disabled(monkeypatch
     assert not Settings.from_env().telegram_heartbeat_ready
 
 
+def test_sleep_and_morning_health_defaults_are_bounded(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot-token")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "123")
+    monkeypatch.setenv("TELEGRAM_SYSTEM_PROMPT", "你是景行。")
+    monkeypatch.setenv("UPSTREAM_API_KEY", "upstream-key")
+    monkeypatch.setenv("UPSTREAM_BASE_URL", "https://relay.example/v1")
+    monkeypatch.setenv("UPSTREAM_MODEL", "claude-model")
+    monkeypatch.delenv("SLEEP_REMINDER_ENABLED", raising=False)
+    monkeypatch.delenv("HEALTH_CONTEXT_ENABLED", raising=False)
+
+    settings = Settings.from_env()
+    assert settings.sleep_guidance_ready
+    assert settings.telegram_sleep_reminder_ready
+    assert settings.sleep_reminder_start_hour == 1
+    assert settings.sleep_reminder_end_hour == 6
+    assert settings.sleep_reminder_recent_activity_minutes == 30
+    assert settings.sleep_reminder_followup_minutes == 60
+    assert settings.sleep_reminder_max_per_night == 2
+    assert settings.health_context_morning_start_hour == 6
+    assert settings.health_context_morning_end_hour == 12
+    assert settings.health_context_max_age_minutes == 45
+
+    monkeypatch.setenv("SLEEP_REMINDER_ENABLED", "false")
+    settings = Settings.from_env()
+    assert not settings.sleep_guidance_ready
+    assert not settings.telegram_sleep_reminder_ready
+
+
 def test_device_perception_defaults_to_safe_shadow_mode(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://memory.example")
     monkeypatch.setenv("SUPABASE_KEY", "publishable-key")
@@ -113,4 +141,6 @@ def test_device_perception_defaults_to_safe_shadow_mode(monkeypatch):
     assert settings.device_perception_cooldown_minutes == 180
 
     monkeypatch.setenv("DEVICE_PERCEPTION_ENABLED", "false")
-    assert not Settings.from_env().device_perception_ready
+    settings = Settings.from_env()
+    assert not settings.device_perception_ready
+    assert settings.health_context_ready

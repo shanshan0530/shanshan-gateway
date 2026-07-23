@@ -371,3 +371,116 @@ def test_device_perception_can_be_disabled_independently():
         transport=httpx.MockTransport(must_not_call),
     )
     assert asyncio.run(bridge.perception_events()) == ()
+
+
+def test_morning_wellbeing_reads_only_latest_fresh_health_snapshot():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/device_data")
+        assert request.url.params["order"] == "id.desc"
+        assert request.url.params["limit"] == "1"
+        assert request.url.params["select"] == "id,timestamp,health_data"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 50,
+                    "timestamp": "2026-07-24 06:50:00",
+                    "health_data": json.dumps(
+                        {
+                            "heartRate": 72,
+                            "hrRestingToday": 65,
+                            "sleepTotalMinutes": 423,
+                            "sleepDeepMinutes": 137,
+                            "sleepRemMinutes": 115,
+                            "spo2AvgToday": 98,
+                            "stepsToday": 120,
+                        }
+                    ),
+                }
+            ],
+        )
+
+    bridge = SupabaseBridge(
+        supabase_settings(
+            health_context_enabled=True,
+            device_perception_enabled=True,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    context = asyncio.run(
+        bridge.wellbeing_context(
+            now=datetime(2026, 7, 23, 23, 0, tzinfo=timezone.utc)
+        )
+    )
+
+    assert "06:50" in context
+    assert "7 小时 3 分" in context
+    assert "当前 72 次/分" in context
+    assert "血氧日均 98%" in context
+    assert "早间健康背景时段" in context
+    assert "七天" not in context
+
+
+def test_stale_morning_health_is_not_injected():
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 49,
+                    "timestamp": "2026-07-24 05:00:00",
+                    "health_data": json.dumps({"heartRate": 72}),
+                }
+            ],
+        )
+
+    bridge = SupabaseBridge(
+        supabase_settings(
+            health_context_enabled=True,
+            health_context_max_age_minutes=45,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    assert (
+        asyncio.run(
+            bridge.wellbeing_context(
+                now=datetime(2026, 7, 23, 23, 0, tzinfo=timezone.utc)
+            )
+        )
+        == ""
+    )
+
+
+def test_sleep_window_guidance_works_without_fresh_health_data():
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    bridge = SupabaseBridge(
+        supabase_settings(sleep_reminder_enabled=True),
+        transport=httpx.MockTransport(handler),
+    )
+    context = asyncio.run(
+        bridge.wellbeing_context(
+            now=datetime(2026, 7, 23, 17, 15, tzinfo=timezone.utc)
+        )
+    )
+    assert "夜间休息提醒时段" in context
+    assert "不要每条回复重复催促" in context
+
+
+def test_wellbeing_outside_configured_windows_does_not_query_supabase():
+    async def must_not_call(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("outside wellbeing windows must not query Supabase")
+
+    bridge = SupabaseBridge(
+        supabase_settings(),
+        transport=httpx.MockTransport(must_not_call),
+    )
+    assert (
+        asyncio.run(
+            bridge.wellbeing_context(
+                now=datetime(2026, 7, 23, 8, 0, tzinfo=timezone.utc)
+            )
+        )
+        == ""
+    )

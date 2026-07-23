@@ -17,6 +17,13 @@ class HeartbeatState:
 
 
 @dataclass(frozen=True)
+class SleepReminderState:
+    last_sent_at: datetime | None
+    night_key: str
+    reminder_count: int
+
+
+@dataclass(frozen=True)
 class PerceptionShadowState:
     last_row_id: int
     last_checked_at: datetime | None
@@ -86,6 +93,17 @@ class ConversationStore:
                     last_sent_at TEXT,
                     daily_date TEXT NOT NULL DEFAULT '',
                     daily_count INTEGER NOT NULL DEFAULT 0 CHECK(daily_count >= 0)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_sleep_reminder_state (
+                    chat_id TEXT PRIMARY KEY,
+                    last_sent_at TEXT,
+                    night_key TEXT NOT NULL DEFAULT '',
+                    reminder_count INTEGER NOT NULL DEFAULT 0
+                        CHECK(reminder_count >= 0)
                 )
                 """
             )
@@ -339,6 +357,63 @@ class ConversationStore:
                 """,
                 (chat_id, int(enabled)),
             )
+
+    def sleep_reminder_state(self, chat_id: str) -> SleepReminderState:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT last_sent_at, night_key, reminder_count
+                FROM telegram_sleep_reminder_state
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+        if row is None:
+            return SleepReminderState(None, "", 0)
+        return SleepReminderState(
+            last_sent_at=_parse_datetime(row["last_sent_at"]),
+            night_key=str(row["night_key"] or ""),
+            reminder_count=max(0, int(row["reminder_count"] or 0)),
+        )
+
+    def record_sleep_reminder_sent(
+        self,
+        chat_id: str,
+        *,
+        sent_at: datetime,
+        night_key: str,
+    ) -> SleepReminderState:
+        sent_utc = sent_at.astimezone(timezone.utc)
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT night_key, reminder_count
+                FROM telegram_sleep_reminder_state
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+            previous_key = str(row["night_key"] or "") if row else ""
+            previous_count = int(row["reminder_count"] or 0) if row else 0
+            count = previous_count + 1 if previous_key == night_key else 1
+            connection.execute(
+                """
+                INSERT INTO telegram_sleep_reminder_state(
+                    chat_id, last_sent_at, night_key, reminder_count
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    last_sent_at = excluded.last_sent_at,
+                    night_key = excluded.night_key,
+                    reminder_count = excluded.reminder_count
+                """,
+                (
+                    chat_id,
+                    sent_utc.isoformat(timespec="seconds"),
+                    night_key,
+                    count,
+                ),
+            )
+        return SleepReminderState(sent_utc, night_key, count)
 
     def record_heartbeat_sent(
         self,

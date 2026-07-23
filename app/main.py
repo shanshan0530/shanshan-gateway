@@ -28,7 +28,7 @@ from .telegram import TelegramBridge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.9.2"
+VERSION = "0.10.0"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
@@ -160,6 +160,28 @@ async def health() -> JSONResponse:
                 "auto_summary": settings.gateway_auto_summary_ready,
                 "summary_message_threshold": settings.gateway_summary_message_threshold,
             },
+            "wellbeing": {
+                "morning_health": {
+                    "ready": settings.health_context_ready,
+                    "window": (
+                        f"{settings.health_context_morning_start_hour:02d}:00-"
+                        f"{settings.health_context_morning_end_hour:02d}:00"
+                    ),
+                    "max_age_minutes": settings.health_context_max_age_minutes,
+                },
+                "sleep_reminder": {
+                    "ready": settings.telegram_sleep_reminder_ready,
+                    "window": (
+                        f"{settings.sleep_reminder_start_hour:02d}:00-"
+                        f"{settings.sleep_reminder_end_hour:02d}:00"
+                    ),
+                    "recent_activity_minutes": (
+                        settings.sleep_reminder_recent_activity_minutes
+                    ),
+                    "followup_minutes": settings.sleep_reminder_followup_minutes,
+                    "max_per_night": settings.sleep_reminder_max_per_night,
+                },
+            },
         },
     )
 
@@ -218,19 +240,24 @@ async def chat_completions(request: Request) -> Response:
 
     prepared = prepare_payload(payload, settings.upstream_model)
     if memory_request.enabled:
-        continuity, eventide_context, recalled_memory = await asyncio.gather(
+        continuity, eventide_context, wellbeing_context, recalled_memory = await asyncio.gather(
             supabase_bridge.continuity_context(
                 exclude_conversation_id=memory_request.conversation_id
             ),
             supabase_bridge.eventide_context(),
+            supabase_bridge.wellbeing_context(),
             ombre_recall.recall(memory_request.user_text),
         )
         inject_system_context(prepared, continuity)
         if recalled_memory:
             inject_system_context(prepared, format_memory_context(recalled_memory))
     else:
-        eventide_context = await supabase_bridge.eventide_context()
+        eventide_context, wellbeing_context = await asyncio.gather(
+            supabase_bridge.eventide_context(),
+            supabase_bridge.wellbeing_context(),
+        )
     inject_system_context(prepared, eventide_context)
+    inject_system_context(prepared, wellbeing_context)
     logger.info(
         "chat request model=%s stream=%s messages=%d memory_mode=%s client=%s",
         settings.upstream_model,

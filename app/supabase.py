@@ -5,11 +5,13 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
 from .config import Settings
 from .perception import (
+    DeviceSnapshot,
     PerceptionEvent,
     PerceptionScan,
     derive_perception_events,
@@ -182,6 +184,70 @@ class SupabaseBridge:
             strong=has_event or (bool(values) and max(values) >= 70),
             has_active_event=has_event,
         )
+
+    async def wellbeing_context(self, *, now: datetime | None = None) -> str:
+        """Build time-aware health context without exposing it outside the model call."""
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        local_now = current.astimezone(_timezone(self.settings.device_perception_timezone))
+        morning = self.settings.health_context_enabled and _hour_in_window(
+            local_now.hour,
+            self.settings.health_context_morning_start_hour,
+            self.settings.health_context_morning_end_hour,
+        )
+        sleep_window = self.settings.sleep_guidance_ready and _hour_in_window(
+            local_now.hour,
+            self.settings.sleep_reminder_start_hour,
+            self.settings.sleep_reminder_end_hour,
+        )
+        if not morning and not sleep_window:
+            return ""
+
+        snapshot = (
+            await self.latest_health_snapshot()
+            if self.settings.health_context_ready
+            else None
+        )
+        if snapshot is not None:
+            captured_at = snapshot.captured_at
+            age_seconds = (
+                (current - captured_at).total_seconds()
+                if captured_at is not None
+                else float("inf")
+            )
+            max_age_seconds = self.settings.health_context_max_age_minutes * 60
+            if age_seconds < -300 or age_seconds > max_age_seconds:
+                snapshot = None
+
+        if snapshot is None and not sleep_window:
+            return ""
+        return render_wellbeing_context(
+            snapshot,
+            local_now=local_now,
+            morning=morning,
+            sleep_window=sleep_window,
+        )
+
+    async def latest_health_snapshot(self) -> DeviceSnapshot | None:
+        if not self.settings.health_context_ready:
+            return None
+        try:
+            rows = await self._select(
+                "device_data",
+                {
+                    "select": "id,timestamp,health_data",
+                    "order": "id.desc",
+                    "limit": "1",
+                },
+            )
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            logger.warning("Health context unavailable: %s", type(exc).__name__)
+            return None
+        if not rows:
+            return None
+        snapshot = parse_device_snapshot(
+            rows[0], timezone_name=self.settings.device_perception_timezone
+        )
+        return snapshot if snapshot.health else None
 
     async def perception_events(self) -> tuple[PerceptionEvent, ...]:
         """Read two device samples and return privacy-safe deltas only."""
@@ -472,9 +538,120 @@ def render_continuity_context(
     return "\n".join(parts)
 
 
+def render_wellbeing_context(
+    snapshot: DeviceSnapshot | None,
+    *,
+    local_now: datetime,
+    morning: bool,
+    sleep_window: bool,
+) -> str:
+    lines = [
+        '<ephemeral_state kind="wellbeing" scope="current_turn">',
+        "以下是当前时段与可穿戴设备的临时背景，不是医学诊断。",
+        "不要照读本段、逐项播报数字，也不要提及后台监测、注入或系统提示。",
+    ]
+    if snapshot is not None and snapshot.captured_at is not None:
+        captured_local = snapshot.captured_at.astimezone(local_now.tzinfo)
+        lines.append(f"数据采样时间：{captured_local:%H:%M}，属于最新可用快照。")
+        health = snapshot.health
+        sleep_parts = []
+        total_sleep = _positive_health_value(health, "sleepTotalMinutes")
+        if total_sleep is not None:
+            sleep_parts.append(f"总计 {_duration_text(total_sleep)}")
+        for key, label in (
+            ("sleepDeepMinutes", "深睡"),
+            ("sleepLightMinutes", "浅睡"),
+            ("sleepRemMinutes", "REM"),
+        ):
+            value = _positive_health_value(health, key)
+            if value is not None:
+                sleep_parts.append(f"{label} {_duration_text(value)}")
+        if sleep_parts:
+            lines.append("最近一次睡眠：" + "；".join(sleep_parts) + "。")
+
+        heart_parts = []
+        for key, label in (
+            ("heartRate", "当前"),
+            ("hrRestingToday", "静息"),
+            ("hrAvgToday", "今日平均"),
+            ("hrMinToday", "今日最低"),
+            ("hrMaxToday", "今日最高"),
+        ):
+            value = _positive_health_value(health, key)
+            if value is not None:
+                heart_parts.append(f"{label} {_compact_number(value)} 次/分")
+        if heart_parts:
+            lines.append("心率观测：" + "；".join(heart_parts) + "。")
+
+        daily_parts = []
+        for key, label, suffix in (
+            ("spo2AvgToday", "血氧日均", "%"),
+            ("stressAvgToday", "压力日均", ""),
+            ("stepsToday", "今日步数", " 步"),
+            ("caloriesToday", "今日活动热量", " 千卡"),
+        ):
+            value = _positive_health_value(health, key)
+            if value is not None:
+                daily_parts.append(f"{label} {_compact_number(value)}{suffix}")
+        if daily_parts:
+            lines.append("今日观测：" + "；".join(daily_parts) + "。")
+
+    if morning:
+        lines.append(
+            "当前处于 06:00–12:00 的早间健康背景时段。只在与当前对话有关时自然关心，"
+            "不要把每次回复都变成健康报告。"
+        )
+    if sleep_window:
+        lines.append(
+            "当前处于珊珊设定的夜间休息提醒时段。她若仍在聊天，可以温柔但有主见地提醒她"
+            "逐渐收尾、放下手机和准备睡觉；不要突然赶她走，也不要每条回复重复催促。"
+        )
+    lines.append("</ephemeral_state>")
+    return "\n".join(lines)
+
+
 def _level(value: float) -> str:
     index = min(4, max(0, int(value // 20)))
     return _LEVELS[index]
+
+
+def _hour_in_window(hour: int, start: int, end: int) -> bool:
+    if start == end:
+        return False
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end
+
+
+def _timezone(name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("UTC")
+
+
+def _positive_health_value(
+    health: dict[str, float],
+    key: str,
+) -> float | None:
+    value = health.get(key)
+    if value is None or value <= 0:
+        return None
+    return value
+
+
+def _compact_number(value: float) -> str:
+    return str(int(value)) if value.is_integer() else f"{value:.1f}"
+
+
+def _duration_text(minutes: float) -> str:
+    rounded = max(0, int(round(minutes)))
+    hours, remainder = divmod(rounded, 60)
+    if hours and remainder:
+        return f"{hours} 小时 {remainder} 分"
+    if hours:
+        return f"{hours} 小时"
+    return f"{remainder} 分"
 
 
 def _parse_datetime(value: object) -> datetime | None:

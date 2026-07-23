@@ -30,7 +30,7 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.9.2",
+        "version": "0.10.0",
         "missing_env": [],
         "upstream_url_valid": True,
         "upstream_host": "relay.example",
@@ -64,6 +64,20 @@ def test_health_is_ready_without_exposing_upstream_path_or_key(monkeypatch):
             "base_url_path": "/memory/v1",
             "auto_summary": False,
             "summary_message_threshold": 24,
+        },
+        "wellbeing": {
+            "morning_health": {
+                "ready": False,
+                "window": "06:00-12:00",
+                "max_age_minutes": 45,
+            },
+            "sleep_reminder": {
+                "ready": False,
+                "window": "01:00-06:00",
+                "recent_activity_minutes": 30,
+                "followup_minutes": 60,
+                "max_per_night": 2,
+            },
         },
     }
     assert "upstream-secret" not in response.text
@@ -159,11 +173,15 @@ def test_chat_injects_eventide_context_before_upstream(monkeypatch):
     async def fake_eventide_context():
         return '<ephemeral_state kind="eventide">状态底色</ephemeral_state>'
 
+    async def fake_wellbeing_context():
+        return '<ephemeral_state kind="wellbeing">该休息了</ephemeral_state>'
+
     async def fake_forward(payload, **kwargs):
         captured.update(payload)
         return JSONResponse({"ok": True})
 
     monkeypatch.setattr(main.supabase_bridge, "eventide_context", fake_eventide_context)
+    monkeypatch.setattr(main.supabase_bridge, "wellbeing_context", fake_wellbeing_context)
     monkeypatch.setattr(main, "forward_to_upstream", fake_forward)
     response = TestClient(main.app).post(
         "/v1/chat/completions",
@@ -181,9 +199,11 @@ def test_chat_injects_eventide_context_before_upstream(monkeypatch):
     assert [message["role"] for message in captured["messages"]] == [
         "system",
         "system",
+        "system",
         "user",
     ]
     assert "状态底色" in captured["messages"][1]["content"]
+    assert "该休息了" in captured["messages"][2]["content"]
 
 
 def test_full_memory_mode_archives_user_and_injects_all_contexts(monkeypatch):
@@ -201,6 +221,9 @@ def test_full_memory_mode_archives_user_and_injects_all_contexts(monkeypatch):
     async def fake_eventide_context():
         return "EVENTIDE-STATE"
 
+    async def fake_wellbeing_context():
+        return "WELLBEING-STATE"
+
     async def fake_recall(query):
         assert query == "想起我们昨天聊的事"
         return "OMBRE-RECALL"
@@ -215,6 +238,7 @@ def test_full_memory_mode_archives_user_and_injects_all_contexts(monkeypatch):
         main.supabase_bridge, "continuity_context", fake_continuity_context
     )
     monkeypatch.setattr(main.supabase_bridge, "eventide_context", fake_eventide_context)
+    monkeypatch.setattr(main.supabase_bridge, "wellbeing_context", fake_wellbeing_context)
     monkeypatch.setattr(main.ombre_recall, "recall", fake_recall)
     monkeypatch.setattr(main, "forward_to_upstream", fake_forward)
 
@@ -246,6 +270,7 @@ def test_full_memory_mode_archives_user_and_injects_all_contexts(monkeypatch):
         "SUPABASE-CONTINUITY",
         main.format_memory_context("OMBRE-RECALL"),
         "EVENTIDE-STATE",
+        "WELLBEING-STATE",
         "想起我们昨天聊的事",
     ]
     assert captured["memory_request"].enabled
@@ -273,6 +298,7 @@ def test_memory_base_url_enables_full_mode_without_custom_headers(monkeypatch):
     monkeypatch.setattr(main.supabase_bridge, "store_message", fake_store_message)
     monkeypatch.setattr(main.supabase_bridge, "continuity_context", fake_context)
     monkeypatch.setattr(main.supabase_bridge, "eventide_context", fake_context)
+    monkeypatch.setattr(main.supabase_bridge, "wellbeing_context", fake_context)
     monkeypatch.setattr(main.ombre_recall, "recall", fake_recall)
     monkeypatch.setattr(main, "forward_to_upstream", fake_forward)
 
