@@ -11,6 +11,13 @@ def _positive_int(name: str, default: int) -> int:
         return default
 
 
+def _nonnegative_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except ValueError:
+        return default
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -41,6 +48,9 @@ class Settings:
     telegram_poll_timeout_seconds: int = 30
     telegram_db_path: str = "/app/data/telegram.sqlite3"
     telegram_max_stored_messages: int = 500
+    telegram_multipart_enabled: bool = True
+    telegram_multipart_max_parts: int = 3
+    telegram_multipart_delay_ms: int = 700
     telegram_heartbeat_enabled: bool = True
     telegram_heartbeat_check_seconds: int = 900
     telegram_heartbeat_silence_minutes: int = 60
@@ -109,6 +119,15 @@ class Settings:
             or "/app/data/telegram.sqlite3",
             telegram_max_stored_messages=_positive_int(
                 "TELEGRAM_MAX_STORED_MESSAGES", 500
+            ),
+            telegram_multipart_enabled=_bool_env(
+                "TELEGRAM_MULTIPART_ENABLED", True
+            ),
+            telegram_multipart_max_parts=_positive_int(
+                "TELEGRAM_MULTIPART_MAX_PARTS", 3
+            ),
+            telegram_multipart_delay_ms=_nonnegative_int(
+                "TELEGRAM_MULTIPART_DELAY_MS", 700
             ),
             telegram_heartbeat_enabled=_bool_env(
                 "TELEGRAM_HEARTBEAT_ENABLED", True
