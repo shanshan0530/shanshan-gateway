@@ -26,6 +26,12 @@ _TELEGRAM_ACTION_RE = re.compile(
     r"(?P<prefix>^|[\s（(。！？!?，,:：；;])\*(?P<action>[^*\n]+?)\*(?=$|[\s）)。,，！？!?：:；;])",
     re.MULTILINE,
 )
+_TELEGRAM_BUBBLE_MARKER = "[[TG_SPLIT]]"
+_TELEGRAM_BUBBLE_RE = re.compile(
+    r"\s*\[\[\s*TG_SPLIT\s*\]\]\s*",
+    re.IGNORECASE,
+)
+_ZH_WEEKDAYS = "一二三四五六日"
 
 
 class TelegramBridge:
@@ -104,12 +110,11 @@ class TelegramBridge:
 
         base_url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token}"
         async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
-            response = await client.post(
-                "/sendMessage",
-                json={"chat_id": self.settings.telegram_allowed_user_id, "text": text.strip()},
+            await self._send_text_with_client(
+                client,
+                self.settings.telegram_allowed_user_id,
+                text.strip(),
             )
-            if response.status_code >= 400:
-                raise RuntimeError(f"Telegram API returned HTTP {response.status_code}")
 
     async def _prepare_long_polling(self) -> None:
         client = self._require_client()
@@ -217,10 +222,11 @@ class TelegramBridge:
             await self._send_text(chat_id, "刚才连接上游时出了点问题，请稍后再试一次。")
             return
 
+        record_answer = self._telegram_record_text(answer)
         self._remember(chat_id, "user", text)
-        self._remember(chat_id, "assistant", answer)
+        self._remember(chat_id, "assistant", record_answer)
         await self._supabase.store_message(
-            role="assistant", content=answer, conversation_id=conversation_id
+            role="assistant", content=record_answer, conversation_id=conversation_id
         )
         await self._send_text(chat_id, answer)
 
@@ -342,10 +348,11 @@ class TelegramBridge:
                 now=current,
             )
             await self.push(message)
-            self._remember(chat_id, "assistant", message)
+            record_message = self._telegram_record_text(message)
+            self._remember(chat_id, "assistant", record_message)
             await self._supabase.store_message(
                 role="assistant",
-                content=message,
+                content=record_message,
                 conversation_id=f"tg:{chat_id}",
             )
             self._record_sleep_reminder_sent(chat_id, current, night_key)
@@ -408,12 +415,13 @@ class TelegramBridge:
                 ):
                     return False
 
-            message = await self._complete_heartbeat(chat_id)
+            message = await self._complete_heartbeat(chat_id, now=current)
             await self.push(message)
-            self._remember(chat_id, "assistant", message)
+            record_message = self._telegram_record_text(message)
+            self._remember(chat_id, "assistant", record_message)
             await self._supabase.store_message(
                 role="assistant",
-                content=message,
+                content=record_message,
                 conversation_id=f"tg:{chat_id}",
             )
             self._record_heartbeat_sent(chat_id, current, local_date)
@@ -439,6 +447,10 @@ class TelegramBridge:
             self._supabase.wellbeing_context(now=now),
         )
         payload_context = {"messages": messages}
+        inject_system_context(
+            payload_context,
+            self._telegram_channel_context(chat_id, now=now),
+        )
         inject_system_context(payload_context, continuity)
         inject_system_context(payload_context, eventide_context)
         inject_system_context(payload_context, wellbeing_context)
@@ -461,7 +473,12 @@ class TelegramBridge:
         messages.append({"role": "user", "content": "生成此刻要主动发出的休息提醒。"})
         return await self._call_upstream(messages, max_tokens=250)
 
-    async def _complete_heartbeat(self, chat_id: str) -> str:
+    async def _complete_heartbeat(
+        self,
+        chat_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
             messages.append(
@@ -474,6 +491,10 @@ class TelegramBridge:
             self._supabase.eventide_context(),
         )
         payload_context = {"messages": messages}
+        inject_system_context(
+            payload_context,
+            self._telegram_channel_context(chat_id, now=now),
+        )
         inject_system_context(payload_context, continuity)
         inject_system_context(payload_context, eventide_context)
         inject_system_context(
@@ -489,7 +510,13 @@ class TelegramBridge:
         messages.append({"role": "user", "content": "生成此刻要主动发出的消息。"})
         return await self._call_upstream(messages, max_tokens=350)
 
-    async def _complete(self, chat_id: str, user_text: str) -> str:
+    async def _complete(
+        self,
+        chat_id: str,
+        user_text: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
         messages: list[dict[str, str]] = []
         if self.settings.telegram_system_prompt:
             messages.append({"role": "system", "content": self.settings.telegram_system_prompt})
@@ -499,6 +526,10 @@ class TelegramBridge:
             self._supabase.wellbeing_context(),
         )
         payload_context = {"messages": messages}
+        inject_system_context(
+            payload_context,
+            self._telegram_channel_context(chat_id, now=now),
+        )
         inject_system_context(payload_context, continuity)
         inject_system_context(payload_context, eventide_context)
         inject_system_context(payload_context, wellbeing_context)
@@ -509,6 +540,26 @@ class TelegramBridge:
         messages.append({"role": "user", "content": user_text})
 
         return await self._call_upstream(messages)
+
+    def _telegram_channel_context(
+        self,
+        chat_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        return _format_telegram_channel_context(
+            now=(now or datetime.now(timezone.utc)).astimezone(timezone.utc),
+            last_user_at=self._last_local_user_activity(chat_id),
+            timezone_name=self.settings.telegram_heartbeat_timezone,
+            multipart_enabled=self.settings.telegram_multipart_enabled,
+            multipart_max_parts=self.settings.telegram_multipart_max_parts,
+        )
+
+    def _telegram_record_text(self, text: str) -> str:
+        return _telegram_record_text(
+            text,
+            max_parts=self.settings.telegram_multipart_max_parts,
+        )
 
     async def _call_upstream(
         self,
@@ -726,17 +777,44 @@ class TelegramBridge:
 
     async def _send_text(self, chat_id: str, text: str) -> None:
         client = self._require_client()
-        for part in _split_telegram_text(text):
-            response = await client.post(
-                "/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": _format_telegram_html(part),
-                    "parse_mode": "HTML",
-                },
-            )
-            if response.status_code >= 400:
-                raise RuntimeError(f"Telegram API returned HTTP {response.status_code}")
+        await self._send_text_with_client(client, chat_id, text)
+
+    async def _send_text_with_client(
+        self,
+        client: httpx.AsyncClient,
+        chat_id: str,
+        text: str,
+    ) -> None:
+        bubbles = _split_telegram_bubbles(
+            text,
+            enabled=self.settings.telegram_multipart_enabled,
+            max_parts=self.settings.telegram_multipart_max_parts,
+        )
+        delay_seconds = min(
+            max(0, self.settings.telegram_multipart_delay_ms),
+            5000,
+        ) / 1000
+        for bubble_index, bubble in enumerate(bubbles):
+            if bubble_index:
+                await client.post(
+                    "/sendChatAction",
+                    json={"chat_id": chat_id, "action": "typing"},
+                )
+                if delay_seconds:
+                    await asyncio.sleep(delay_seconds)
+            for part in _split_telegram_text(bubble):
+                response = await client.post(
+                    "/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": _format_telegram_html(part),
+                        "parse_mode": "HTML",
+                    },
+                )
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        f"Telegram API returned HTTP {response.status_code}"
+                    )
 
     def _require_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -765,6 +843,95 @@ def _format_telegram_html(text: str) -> str:
         lambda match: f"{match.group('prefix')}<i>{match.group('action')}</i>",
         escaped,
     )
+
+
+def _split_telegram_bubbles(
+    text: str,
+    *,
+    enabled: bool = True,
+    max_parts: int = 3,
+) -> list[str]:
+    value = text.strip()
+    if not value:
+        return ["（空消息）"]
+    raw_parts = [part.strip() for part in _TELEGRAM_BUBBLE_RE.split(value)]
+    parts = [part for part in raw_parts if part]
+    if not parts:
+        return ["（空消息）"]
+    limit = min(max(1, max_parts), 5)
+    if not enabled:
+        return ["\n\n".join(parts)]
+    if len(parts) > limit:
+        parts = parts[: limit - 1] + ["\n\n".join(parts[limit - 1 :])]
+    return parts
+
+
+def _telegram_record_text(text: str, *, max_parts: int = 3) -> str:
+    """Remove transport markers before history and Supabase persistence."""
+    return "\n\n".join(
+        _split_telegram_bubbles(text, enabled=True, max_parts=max_parts)
+    )
+
+
+def _format_telegram_channel_context(
+    *,
+    now: datetime,
+    last_user_at: datetime | None,
+    timezone_name: str,
+    multipart_enabled: bool,
+    multipart_max_parts: int,
+) -> str:
+    try:
+        local_timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        local_timezone = ZoneInfo("UTC")
+        timezone_name = "UTC"
+    current = now.astimezone(timezone.utc)
+    local_now = current.astimezone(local_timezone)
+    weekday = _ZH_WEEKDAYS[local_now.weekday()]
+    lines = [
+        "当前渠道是你与珊珊的 Telegram 私聊。",
+        (
+            f"当前本地时间是 {local_now:%Y-%m-%d %H:%M}，"
+            f"星期{weekday}（{timezone_name}）。"
+        ),
+    ]
+    if last_user_at is None:
+        lines.append("此前一条 TG 用户消息的时间未知。")
+    else:
+        elapsed = current - last_user_at.astimezone(timezone.utc)
+        if elapsed < timedelta(minutes=-5):
+            lines.append("此前一条 TG 用户消息的时间暂不可可靠判断。")
+        else:
+            lines.append(
+                f"距离珊珊此前一条 TG 消息约 {_format_elapsed(max(elapsed, timedelta()))}。"
+            )
+    lines.append(
+        "把时间与间隔当作自然聊天背景：只在确实有意义时体现，不要每轮机械报时，"
+        "也不要解释时间从何而来。这里默认是即时通讯式聊天，不要自动进入舞台剧或长篇 RP，"
+        "动作描写只在自然需要时少量使用。"
+    )
+    if multipart_enabled:
+        max_bubbles = min(max(1, multipart_max_parts), 5)
+        lines.append(
+            "当一条回复自然适合分成两三次发送时，可以在消息气泡之间单独输出"
+            f" {_TELEGRAM_BUBBLE_MARKER}；这不是必须，不要每次拆分，最多 {max_bubbles} 个气泡。"
+            "分隔符是内部通道控制符，不要加反引号、不要解释或讨论它。"
+        )
+    return "\n".join(lines)
+
+
+def _format_elapsed(delta: timedelta) -> str:
+    total_minutes = max(0, int(delta.total_seconds() // 60))
+    if total_minutes < 1:
+        return "不到 1 分钟"
+    if total_minutes < 60:
+        return f"{total_minutes} 分钟"
+    total_hours, minutes = divmod(total_minutes, 60)
+    if total_hours < 24:
+        return f"{total_hours} 小时" + (f" {minutes} 分钟" if minutes else "")
+    days, hours = divmod(total_hours, 24)
+    return f"{days} 天" + (f" {hours} 小时" if hours else "")
 
 
 def _split_telegram_text(text: str, limit: int = 4000) -> list[str]:
