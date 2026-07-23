@@ -2,7 +2,7 @@
 
 给新前端使用的轻量 OpenAI 兼容网关。它把新前端的聊天请求安全地转发给支持 OpenAI 格式的 Claude 中转站。
 
-第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供 Gateway 全记忆模式；v0.7 增加分批自动总结；v0.8 增加可控的 TG 主动心跳；v0.9 建立只读设备感知与隐私安全事件层；v0.10 增加跨端早间健康背景与防刷屏催睡。
+第一版刻意保持简单：不修改 Ombre Brain，也暂时不做世界书。v0.2 增加私人 Telegram 通道；v0.3 使用本地 SQLite 持久化 TG 短期上下文；v0.4 可通过 MCP 对原版 OB 做只读自动召回；v0.5 接入 Supabase 跨端连续记忆与 Eventide 临时状态；v0.6 为缺少原生记忆的新前端提供 Gateway 全记忆模式；v0.7 增加分批自动总结；v0.8 增加可控的 TG 主动心跳；v0.9 建立只读设备感知与隐私安全事件层；v0.10 增加跨端早间健康背景与防刷屏催睡；v0.11 增加 TG 时间感知、渠道语境与自然多气泡发送。
 
 ## 路线
 
@@ -214,6 +214,26 @@ HEALTH_CONTEXT_MORNING_END_HOUR=12
 HEALTH_CONTEXT_MAX_AGE_MINUTES=45
 ```
 
+## v0.11 TG 时间感知与自然多气泡
+
+- 每次 TG 模型调用都会获得台湾本地日期、星期和时间；
+- 同时提供距离上一条 TG 用户消息的大致间隔，让久别后的语气更自然；
+- 时间仅作为背景，不要求模型每轮报时，也不会写入长期记忆；
+- 代码内置“当前是 Telegram 私聊”的渠道语境，不依赖角色提示词重复声明；
+- 回复默认仍是普通即时聊天，不自动进入长篇舞台剧或频繁动作描写；
+- 模型可按需使用内部 `[[TG_SPLIT]]` 标记，把一轮回复拆成最多 3 个消息气泡；
+- 网关发送前会移除标记，并在气泡间显示输入状态、稍作停顿；
+- SQLite 和 Supabase 仍保存为一条干净的完整回复，不会把记录切碎；
+- 普通换行和超过 Telegram 单条长度限制的安全拆分保持兼容。
+
+以下均为可选配置；不在 Zeabur 添加也会使用默认值：
+
+```text
+TELEGRAM_MULTIPART_ENABLED=true
+TELEGRAM_MULTIPART_MAX_PARTS=3
+TELEGRAM_MULTIPART_DELAY_MS=700
+```
+
 ### 后续路线
 
 - 自动总结之上的纠错和 OB 选择性长期写入；
@@ -283,6 +303,9 @@ API Key: Zeabur 说明页显示的 Gateway API Key
 | `TELEGRAM_POLL_TIMEOUT_SECONDS` | 否 | 长轮询等待时间，默认 30 秒 |
 | `TELEGRAM_DB_PATH` | 否 | TG 短期会话数据库，默认 `/app/data/telegram.sqlite3` |
 | `TELEGRAM_MAX_STORED_MESSAGES` | 否 | 每个私聊最多保留的消息数，默认 500 |
+| `TELEGRAM_MULTIPART_ENABLED` | 否 | 是否允许模型按语义拆成多个 TG 气泡，默认 true |
+| `TELEGRAM_MULTIPART_MAX_PARTS` | 否 | 一轮回复最多拆成的语义气泡数，默认 3，代码硬上限 5 |
+| `TELEGRAM_MULTIPART_DELAY_MS` | 否 | 语义气泡之间的停顿毫秒数，默认 700，代码硬上限 5000 |
 | `TELEGRAM_HEARTBEAT_ENABLED` | 否 | 是否启动 TG 主动心跳，默认 true；可再用 TG 命令暂停 |
 | `TELEGRAM_HEARTBEAT_CHECK_SECONDS` | 否 | 后台条件检查间隔，默认 900 秒 |
 | `TELEGRAM_HEARTBEAT_SILENCE_MINUTES` | 否 | 允许首次主动联系前的沉默时间，默认 60 分钟 |
