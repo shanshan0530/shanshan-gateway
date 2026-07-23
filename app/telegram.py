@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -18,6 +20,12 @@ from .supabase import SupabaseBridge, inject_system_context
 
 
 logger = logging.getLogger("shanshan-gateway.telegram")
+
+
+_TELEGRAM_ACTION_RE = re.compile(
+    r"(?P<prefix>^|[\s（(。！？!?，,:：；;])\*(?P<action>[^*\n]+?)\*(?=$|[\s）)。,，！？!?：:；;])",
+    re.MULTILINE,
+)
 
 
 class TelegramBridge:
@@ -541,7 +549,14 @@ class TelegramBridge:
     async def _send_text(self, chat_id: str, text: str) -> None:
         client = self._require_client()
         for part in _split_telegram_text(text):
-            response = await client.post("/sendMessage", json={"chat_id": chat_id, "text": part})
+            response = await client.post(
+                "/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": _format_telegram_html(part),
+                    "parse_mode": "HTML",
+                },
+            )
             if response.status_code >= 400:
                 raise RuntimeError(f"Telegram API returned HTTP {response.status_code}")
 
@@ -563,6 +578,15 @@ def _content_to_text(content: Any) -> str:
                 parts.append(item["text"])
         return "\n".join(parts)
     return ""
+
+
+def _format_telegram_html(text: str) -> str:
+    """Render only paired action markers while keeping arbitrary model text safe."""
+    escaped = html.escape(text, quote=False)
+    return _TELEGRAM_ACTION_RE.sub(
+        lambda match: f"{match.group('prefix')}<i>{match.group('action')}</i>",
+        escaped,
+    )
 
 
 def _split_telegram_text(text: str, limit: int = 4000) -> list[str]:

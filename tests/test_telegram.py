@@ -1,11 +1,15 @@
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
+
+import httpx
 
 from app.config import Settings
 from app.supabase import HeartbeatSignal
 from app.telegram import (
     TelegramBridge,
     _content_to_text,
+    _format_telegram_html,
     _is_quiet_hour,
     _split_telegram_text,
 )
@@ -21,6 +25,42 @@ def test_split_telegram_text_preserves_all_content():
     assert len(parts) > 1
     assert all(len(part) <= 500 for part in parts)
     assert "".join(parts).replace("\n", "") == text.replace("\n", "")
+
+
+def test_telegram_html_formats_actions_and_escapes_other_markup():
+    text = "哦。\n*往你那边走过来*\n价格是 2*3*4。\n<b>不是标签</b>"
+
+    assert _format_telegram_html(text) == (
+        "哦。\n<i>往你那边走过来</i>\n价格是 2*3*4。\n"
+        "&lt;b&gt;不是标签&lt;/b&gt;"
+    )
+
+
+def test_send_text_uses_safe_telegram_html(tmp_path):
+    payloads = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    async def send():
+        bridge = TelegramBridge(heartbeat_settings(tmp_path))
+        async with httpx.AsyncClient(
+            base_url="https://api.telegram.org",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            bridge._client = client
+            await bridge._send_text("123", "*把你拉过来* & <坏标签>")
+
+    asyncio.run(send())
+
+    assert payloads == [
+        {
+            "chat_id": "123",
+            "text": "<i>把你拉过来</i> &amp; &lt;坏标签&gt;",
+            "parse_mode": "HTML",
+        }
+    ]
 
 
 def test_bridge_reads_persisted_history_after_recreation(tmp_path):

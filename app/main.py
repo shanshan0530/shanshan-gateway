@@ -28,7 +28,7 @@ from .telegram import TelegramBridge
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("shanshan-gateway")
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 settings = Settings.from_env()
 telegram_bridge = TelegramBridge(settings)
