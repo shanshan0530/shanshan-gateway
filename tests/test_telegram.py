@@ -9,9 +9,12 @@ from app.supabase import HeartbeatSignal
 from app.telegram import (
     TelegramBridge,
     _content_to_text,
+    _format_telegram_channel_context,
     _format_telegram_html,
     _is_quiet_hour,
+    _split_telegram_bubbles,
     _split_telegram_text,
+    _telegram_record_text,
 )
 
 
@@ -25,6 +28,43 @@ def test_split_telegram_text_preserves_all_content():
     assert len(parts) > 1
     assert all(len(part) <= 500 for part in parts)
     assert "".join(parts).replace("\n", "") == text.replace("\n", "")
+
+
+def test_split_telegram_bubbles_removes_marker_and_caps_semantic_parts():
+    text = "第一条\n[[TG_SPLIT]]\n第二条[[tg_split]]第三条[[TG_SPLIT]]第四条"
+
+    assert _split_telegram_bubbles(text, max_parts=3) == [
+        "第一条",
+        "第二条",
+        "第三条\n\n第四条",
+    ]
+    assert _telegram_record_text(text, max_parts=3) == (
+        "第一条\n\n第二条\n\n第三条\n\n第四条"
+    )
+
+
+def test_disabled_multipart_still_hides_transport_marker():
+    assert _split_telegram_bubbles(
+        "先说一句[[TG_SPLIT]]再说一句",
+        enabled=False,
+    ) == ["先说一句\n\n再说一句"]
+
+
+def test_telegram_channel_context_contains_local_time_gap_and_channel():
+    context = _format_telegram_channel_context(
+        now=datetime(2026, 7, 23, 8, 30, tzinfo=timezone.utc),
+        last_user_at=datetime(2026, 7, 23, 6, 15, tzinfo=timezone.utc),
+        timezone_name="Asia/Taipei",
+        multipart_enabled=True,
+        multipart_max_parts=3,
+    )
+
+    assert "Telegram 私聊" in context
+    assert "2026-07-23 16:30" in context
+    assert "星期四" in context
+    assert "2 小时 15 分钟" in context
+    assert "[[TG_SPLIT]]" in context
+    assert "不要每轮机械报时" in context
 
 
 def test_telegram_html_formats_actions_and_escapes_other_markup():
@@ -61,6 +101,44 @@ def test_send_text_uses_safe_telegram_html(tmp_path):
             "parse_mode": "HTML",
         }
     ]
+
+
+def test_send_text_sends_semantic_bubbles_without_leaking_marker(tmp_path):
+    payloads = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={"ok": True})
+
+    async def send():
+        bridge = TelegramBridge(
+            heartbeat_settings(tmp_path, telegram_multipart_delay_ms=0)
+        )
+        async with httpx.AsyncClient(
+            base_url="https://api.telegram.org",
+            transport=httpx.MockTransport(handler),
+        ) as client:
+            bridge._client = client
+            await bridge._send_text(
+                "123",
+                "第一条[[TG_SPLIT]]*第二条动作*",
+            )
+
+    asyncio.run(send())
+
+    sent_messages = [
+        payload for path, payload in payloads if path.endswith("/sendMessage")
+    ]
+    assert sent_messages == [
+        {"chat_id": "123", "text": "第一条", "parse_mode": "HTML"},
+        {
+            "chat_id": "123",
+            "text": "<i>第二条动作</i>",
+            "parse_mode": "HTML",
+        },
+    ]
+    assert any(path.endswith("/sendChatAction") for path, _ in payloads)
+    assert all("[[TG_SPLIT]]" not in payload["text"] for payload in sent_messages)
 
 
 def test_bridge_reads_persisted_history_after_recreation(tmp_path):
@@ -125,8 +203,9 @@ def test_heartbeat_sends_after_silence_and_persists_count(tmp_path):
     async def heartbeat_signal():
         return HeartbeatSignal(False, False)
 
-    async def complete(chat_id):
+    async def complete(chat_id, *, now=None):
         assert chat_id == "123"
+        assert now == datetime(2026, 7, 23, 5, 0, tzinfo=timezone.utc)
         return "主动来找你。"
 
     async def push(text):
