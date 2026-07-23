@@ -89,6 +89,9 @@ def test_telegram_heartbeat_uses_sticky_defaults_and_can_be_disabled(monkeypatch
 
     settings = Settings.from_env()
     assert settings.telegram_heartbeat_ready
+    assert settings.telegram_multipart_enabled
+    assert settings.telegram_multipart_max_parts == 3
+    assert settings.telegram_multipart_delay_ms == 700
     assert settings.telegram_heartbeat_silence_minutes == 60
     assert settings.telegram_heartbeat_cooldown_minutes == 90
     assert settings.telegram_heartbeat_strong_cooldown_minutes == 45
