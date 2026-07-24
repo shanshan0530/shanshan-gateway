@@ -9,12 +9,53 @@ import httpx
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import Response
 
+from . import telegram as telegram_module
 from .main import app, forward_to_upstream, require_auth, settings, supabase_bridge
 from .proxy import prepare_payload
 from .supabase import inject_system_context, render_continuity_context
 
 
 logger = logging.getLogger("shanshan-gateway.continuity")
+
+
+def _split_telegram_bubbles_on_newlines(
+    text: str,
+    *,
+    enabled: bool = True,
+    max_parts: int = 3,
+) -> list[str]:
+    """Send each non-empty output line as a Telegram bubble."""
+    value = text.strip()
+    if not value:
+        return ["（空消息）"]
+
+    marker_parts = [
+        part.strip()
+        for part in telegram_module._TELEGRAM_BUBBLE_RE.split(value)
+        if part.strip()
+    ]
+    if not marker_parts:
+        return ["（空消息）"]
+    if not enabled:
+        return ["\n\n".join(marker_parts)]
+
+    parts = [
+        line.strip()
+        for block in marker_parts
+        for line in block.splitlines()
+        if line.strip()
+    ]
+    if not parts:
+        return ["（空消息）"]
+
+    limit = min(max(1, max_parts), 5)
+    if len(parts) > limit:
+        parts = parts[: limit - 1] + ["\n".join(parts[limit - 1 :])]
+    return parts
+
+
+# Telegram's send and persistence paths both resolve this function at runtime.
+telegram_module._split_telegram_bubbles = _split_telegram_bubbles_on_newlines
 
 
 async def _telegram_continuity_context() -> str:
